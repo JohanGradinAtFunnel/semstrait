@@ -634,7 +634,7 @@ fn detect_aggregation_mismatches(
                     let table_group_measures = metric.table_group_measures();
                     for (_tg, measure_name) in table_group_measures {
                         // Look up the measure definition
-                        for table_group in &model.table_groups {
+                        for table_group in &model.dataset_groups {
                             if let Some(measure) = table_group.measures.iter()
                                 .find(|m| m.name == measure_name) {
 

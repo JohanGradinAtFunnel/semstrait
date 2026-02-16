@@ -1,6 +1,6 @@
-# Test fixture for multi-table JOIN within same tableGroup
+# Test fixture for multi-table JOIN within same datasetGroup
 # 
-# Scenario: Two tables (campaign_summary, campaign_details) in the same tableGroup
+# Scenario: Two tables (campaign_summary, campaign_details) in the same datasetGroup
 # with different measures but shared dimensions. This tests the JOIN path when
 # a query requires measures from multiple tables.
 #
@@ -16,13 +16,13 @@ semantic_models:
     
     # Virtual dimension for table metadata
     dimensions:
-      - name: _table
+      - name: _dataset
         virtual: true
         label: Table Metadata
         attributes:
           - name: model
             type: string
-          - name: tableGroup
+          - name: datasetGroup
             type: string
           - name: table
             type: string
@@ -53,7 +53,7 @@ semantic_models:
           divide: [cost, clicks]
         type: f64
     
-    tableGroups:
+    datasetGroups:
       - name: marketing
         
         # Dimensions (all degenerate - on fact tables)
@@ -74,7 +74,7 @@ semantic_models:
                 column: campaign_id
                 type: string
           
-          - name: _table
+          - name: _dataset
         
         # Measures - split across tables
         measures:
@@ -99,25 +99,25 @@ semantic_models:
             type: i64
         
         # Two tables with DIFFERENT measure subsets
-        tables:
-          # Summary table: has impressions and clicks (more aggregated - fewer dims)
-          - table: "campaign_summary"
+        datasets:
+          # Summary dataset: has impressions and clicks (more aggregated - fewer dims)
+          - dataset: "campaign_summary"
             source:
               type: parquet
               path: /data/campaign_summary.parquet
             dimensions:
               dates: [date]
               campaign: [name]
-              _table: [model, tableGroup, table]
+              _dataset: [model, datasetGroup, dataset]
             measures: [impressions, clicks]
           
-          # Details table: has cost and conversions (less aggregated - more dims)
-          - table: "campaign_details"
+          # Details dataset: has cost and conversions (less aggregated - more dims)
+          - dataset: "campaign_details"
             source:
               type: parquet
               path: /data/campaign_details.parquet
             dimensions:
               dates: [date, month]
               campaign: [name, id]
-              _table: [model, tableGroup, table]
+              _dataset: [model, datasetGroup, dataset]
             measures: [cost, conversions]

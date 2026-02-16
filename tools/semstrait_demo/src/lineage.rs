@@ -91,10 +91,10 @@ fn print_table_attribution(model: &SemanticModel, _request: &QueryRequest) {
     println!("🏷️  Source Attribution:");
 
     // Show which tableGroups will be queried
-    println!("  📊 Model: {} ({} table groups)", model.name, model.table_groups.len());
+    println!("  📊 Model: {} ({} dataset groups)", model.name, model.dataset_groups.len());
 
-    for table_group in &model.table_groups {
-        println!("  📁 TableGroup: {}", table_group.name);
+    for table_group in &model.dataset_groups {
+        println!("  📁 DatasetGroup: {}", table_group.name);
 
         for table in &table_group.tables {
             println!("    📄 Table: {} ({} measures, {} dimensions)",
