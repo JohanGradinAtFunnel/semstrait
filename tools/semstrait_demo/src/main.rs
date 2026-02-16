@@ -605,8 +605,8 @@ fn load_and_override_schema(adwords_path: &str, facebook_path: &str) -> anyhow::
     // Override the parquet paths in the schema
     for model in &mut schema.semantic_models {
         for table_group in &mut model.dataset_groups {
-            for table in &mut table_group.tables {
-                let new_path = match table.table.as_str() {
+            for table in &mut table_group.datasets {
+                let new_path = match table.dataset.as_str() {
                     "adwords_campaigns" => adwords_path,
                     "facebook_campaigns" => facebook_path,
                     _ => continue,

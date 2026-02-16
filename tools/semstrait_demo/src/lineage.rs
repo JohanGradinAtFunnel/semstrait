@@ -96,9 +96,9 @@ fn print_table_attribution(model: &SemanticModel, _request: &QueryRequest) {
     for table_group in &model.dataset_groups {
         println!("  📁 DatasetGroup: {}", table_group.name);
 
-        for table in &table_group.tables {
+        for table in &table_group.datasets {
             println!("    📄 Table: {} ({} measures, {} dimensions)",
-                table.table,
+                table.dataset,
                 table.measures.len(),
                 table.dimensions.len()
             );

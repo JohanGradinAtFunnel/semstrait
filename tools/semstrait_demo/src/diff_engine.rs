@@ -630,8 +630,8 @@ fn detect_aggregation_mismatches(
         for metric_name in metric_names {
             if let Some(metric) = model.get_metric(metric_name) {
                 // Check if metric uses non-additive aggregations
-                if metric.is_cross_table_group() {
-                    let table_group_measures = metric.table_group_measures();
+                if metric.is_cross_dataset_group() {
+                    let table_group_measures = metric.dataset_group_measures();
                     for (_tg, measure_name) in table_group_measures {
                         // Look up the measure definition
                         for table_group in &model.dataset_groups {

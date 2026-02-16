@@ -2,7 +2,7 @@ semantic_models:
   - name: "marketing-demo"
     namespace: "demo"
     label: "Marketing Analytics Demo"
-    description: "Demo semantic model showing UNION across tableGroups"
+    description: "Demo semantic model showing UNION across datasetGroups"
 
     # Virtual dimension for table metadata
     dimensions:
@@ -66,7 +66,7 @@ semantic_models:
             label: "User ID"
             description: "User identifier"
 
-    tableGroups:
+    datasetGroups:
       # AdWords tableGroup
       - name: adwords
         label: "AdWords Campaigns"
@@ -92,8 +92,8 @@ semantic_models:
             expr: user_id
             type: i64
             label: "AdWords Unique Users"
-        tables:
-          - table: "adwords_campaigns"
+        datasets:
+          - dataset: "adwords_campaigns"
             source:
               type: parquet
               path: "/tmp/adwords_campaigns.parquet"  # Will be overridden in demo
@@ -131,8 +131,8 @@ semantic_models:
             expr: user_id
             type: i64
             label: "Facebook Unique Users"
-        tables:
-          - table: "facebook_campaigns"
+        datasets:
+          - dataset: "facebook_campaigns"
             source:
               type: parquet
               path: "/tmp/facebook_campaigns.parquet"  # Will be overridden in demo
@@ -155,10 +155,10 @@ semantic_models:
           case:
             when:
               - condition:
-                  eq: [tableGroup.name, "adwords"]
+                  eq: [datasetGroup.name, "adwords"]
                 then: cost
               - condition:
-                  eq: [tableGroup.name, "facebook"]
+                  eq: [datasetGroup.name, "facebook"]
                 then: spend
             else: 0
 
@@ -171,10 +171,10 @@ semantic_models:
           case:
             when:
               - condition:
-                  eq: [tableGroup.name, "adwords"]
+                  eq: [datasetGroup.name, "adwords"]
                 then: impressions
               - condition:
-                  eq: [tableGroup.name, "facebook"]
+                  eq: [datasetGroup.name, "facebook"]
                 then: impressions
             else: 0
 
@@ -187,9 +187,9 @@ semantic_models:
           case:
             when:
               - condition:
-                  eq: [tableGroup.name, "adwords"]
+                  eq: [datasetGroup.name, "adwords"]
                 then: user_id
               - condition:
-                  eq: [tableGroup.name, "facebook"]
+                  eq: [datasetGroup.name, "facebook"]
                 then: user_id
             else: 0
