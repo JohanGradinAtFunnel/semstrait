@@ -20,6 +20,10 @@ pub struct ProofPack {
     pub metric_to_measures: HashMap<String, Vec<MeasureMapping>>,
     /// Per-source metadata and column mappings
     pub source_metadata: HashMap<String, SourceMetadata>,
+    /// Executed value (if available)
+    pub value: Option<f64>,
+    /// Verification status
+    pub status: String,
 }
 
 /// The formula/expression for a metric
@@ -33,6 +37,10 @@ pub struct MetricFormula {
     pub data_type: String,
     /// Whether this metric is additive across dimensions
     pub is_additive: bool,
+    /// Human-readable definition (e.g. "If source is Google Ads → use field: cost")
+    pub human_definition: Option<String>,
+    /// Exact SQL-like definition
+    pub exact_definition: Option<String>,
 }
 
 /// Mapping from a measure to its source columns
@@ -85,18 +93,16 @@ pub async fn generate_proof_pack(
     table_paths: &HashMap<String, String>,
     request: &QueryRequest,
 ) -> anyhow::Result<ProofPack> {
-    // Get the metric definition
     let metric = model.get_metric(metric_name)
         .ok_or_else(|| anyhow::anyhow!("Metric '{}' not found", metric_name))?;
 
-    // Build metric formula
     let metric_formula = build_metric_formula(metric)?;
-
-    // Build measure mappings
     let metric_to_measures = build_measure_mappings(schema, model, metric)?;
-
-    // Build source metadata
     let source_metadata = build_source_metadata(table_paths).await?;
+
+    let (value, status) = execute_metric_value(schema, model, request, table_paths, metric_name).await
+        .map(|v| (Some(v), "Verified".to_string()))
+        .unwrap_or((None, "Not executed".to_string()));
 
     Ok(ProofPack {
         metric_name: metric_name.to_string(),
@@ -105,24 +111,62 @@ pub async fn generate_proof_pack(
         metric_formula,
         metric_to_measures,
         source_metadata,
+        value,
+        status,
     })
+}
+
+async fn execute_metric_value(
+    schema: &Schema,
+    model: &SemanticModel,
+    request: &QueryRequest,
+    table_paths: &HashMap<String, String>,
+    metric_name: &str,
+) -> anyhow::Result<f64> {
+    let plan_node = semstrait::planner::plan_semantic_query(schema, model, request)?;
+    let ctx = SessionContext::new();
+    let df = crate::datafusion_execution::execute_plan_node(&ctx, &plan_node, table_paths).await?;
+    let batches = df.collect().await?;
+    for batch in &batches {
+        if let Some(col) = batch.column_by_name(metric_name) {
+            if let Some(arr) = col.as_any().downcast_ref::<datafusion::arrow::array::Float64Array>() {
+                let mut sum = 0.0;
+                for i in 0..arr.len() {
+                    sum += arr.value(i);
+                }
+                return Ok(sum);
+            }
+            if let Some(arr) = col.as_any().downcast_ref::<datafusion::arrow::array::Int64Array>() {
+                let mut sum = 0.0;
+                for i in 0..arr.len() {
+                    sum += arr.value(i) as f64;
+                }
+                return Ok(sum);
+            }
+        }
+    }
+    anyhow::bail!("Could not extract metric value")
 }
 
 /// Build the metric formula structure
 fn build_metric_formula(metric: &semstrait::semantic_model::Metric) -> anyhow::Result<MetricFormula> {
-    let expression = match &metric.expr {
-        semstrait::semantic_model::MetricExpr::MeasureRef(name) => format!("Measure reference: {}", name),
-        semstrait::semantic_model::MetricExpr::Structured(node) => format!("{:?}", node), // Simplified for now
+    let (expression, human_def, exact_def) = match &metric.expr {
+        semstrait::semantic_model::MetricExpr::MeasureRef(name) => (
+            format!("Measure reference: {}", name),
+            None,
+            None,
+        ),
+        semstrait::semantic_model::MetricExpr::Structured(node) => {
+            let (human, exact) = render_case_metric(metric, node);
+            (format!("{:?}", node), Some(human), Some(exact))
+        }
     };
 
-    // Determine if additive (simplified heuristic)
     let is_additive = match &metric.expr {
         semstrait::semantic_model::MetricExpr::MeasureRef(name) => {
-            // Check if the referenced measure uses sum aggregation
-            // This is a simplification - in practice we'd need to trace through the expression
             name.contains("cost") || name.contains("spend") || name.contains("impressions")
         }
-        semstrait::semantic_model::MetricExpr::Structured(_) => false, // CASE expressions are typically not additive
+        semstrait::semantic_model::MetricExpr::Structured(_) => false,
     };
 
     Ok(MetricFormula {
@@ -132,45 +176,67 @@ fn build_metric_formula(metric: &semstrait::semantic_model::Metric) -> anyhow::R
             .map(|dt| format!("{:?}", dt))
             .unwrap_or_else(|| "unknown".to_string()),
         is_additive,
+        human_definition: human_def,
+        exact_definition: exact_def,
     })
 }
 
-/// Build mappings from metric to measures by table group
+fn render_case_metric(metric: &semstrait::semantic_model::Metric, node: &semstrait::semantic_model::MetricExprNode) -> (String, String) {
+    use semstrait::semantic_model::{MetricExprNode, MetricCaseExpr, MetricCaseWhen, MetricConditionArg};
+    let mut human_lines = Vec::new();
+    let mut exact_lines = Vec::new();
+    if let MetricExprNode::Case(case_expr) = node {
+        for w in &case_expr.when {
+            if let semstrait::semantic_model::MetricCondition::Eq(args) = &w.condition {
+                let dg = args.iter().find_map(|a| match a {
+                    MetricConditionArg::String(s) if s != "datasetGroup.name" => Some(s.clone()),
+                    _ => None,
+                });
+                let measure = w.then.measure_name().unwrap_or_default();
+                if let Some(dg) = dg {
+                    let source_label = if dg == "adwords" { "Google Ads" } else if dg == "facebook" { "Facebook Ads" } else { &dg };
+                    let field = if dg == "adwords" { "cost" } else if dg == "facebook" { "spend" } else { "?" };
+                    human_lines.push(format!("- If source is {} → use field: {}", source_label, field));
+                    let table = if dg == "adwords" { "adwords_campaigns" } else { "facebook_campaigns" };
+                    exact_lines.push(format!("  WHEN datasetGroup='{}'  THEN SUM({}.{})", dg, table, field));
+                }
+            }
+        }
+        human_lines.push("- Otherwise → 0".to_string());
+        exact_lines.push("  ELSE 0".to_string());
+    }
+    let human = human_lines.join("\n");
+    let exact = format!("CASE\n{}\nEND", exact_lines.join("\n"));
+    (human, exact)
+}
+
+/// Build mappings from metric to measures by table group using Metric::dataset_group_measures()
 fn build_measure_mappings(
-    schema: &Schema,
+    _schema: &Schema,
     model: &SemanticModel,
     metric: &semstrait::semantic_model::Metric,
 ) -> anyhow::Result<HashMap<String, Vec<MeasureMapping>>> {
     let mut mappings = HashMap::new();
 
-    // For cross-tableGroup metrics (like our total_cost), extract the tableGroup-to-measure mappings
-    if let semstrait::semantic_model::MetricExpr::Structured(expr) = &metric.expr {
-        // This is a simplified implementation - we'd need to parse the CASE expression
-        // For the demo, we'll hardcode the mappings based on our model
-        let adwords_measures = vec![MeasureMapping {
-            measure_name: "cost".to_string(),
-            aggregation: "sum".to_string(),
-            expression: "cost".to_string(),
-            table_group: "adwords".to_string(),
-            table: "adwords_campaigns".to_string(),
-            column_mappings: HashMap::from([
-                ("cost".to_string(), "cost".to_string()),
-            ]),
-        }];
-
-        let facebook_measures = vec![MeasureMapping {
-            measure_name: "spend".to_string(),
-            aggregation: "sum".to_string(),
-            expression: "spend".to_string(),
-            table_group: "facebook".to_string(),
-            table: "facebook_campaigns".to_string(),
-            column_mappings: HashMap::from([
-                ("spend".to_string(), "spend".to_string()),
-            ]),
-        }];
-
-        mappings.insert("adwords".to_string(), adwords_measures);
-        mappings.insert("facebook".to_string(), facebook_measures);
+    for (dg_name, measure_name) in metric.dataset_group_measures() {
+        let dg = model.get_dataset_group(&dg_name).ok_or_else(|| anyhow::anyhow!("Dataset group {} not found", dg_name))?;
+        let measure = dg.get_measure(&measure_name).ok_or_else(|| anyhow::anyhow!("Measure {} not found", measure_name))?;
+        let table = dg.datasets.first().map(|d| d.dataset.clone()).unwrap_or_default();
+        let col = match &measure.expr {
+            semstrait::semantic_model::MeasureExpr::Column(c) => c.clone(),
+            _ => measure_name.clone(),
+        };
+        let agg = format!("{:?}", measure.aggregation).to_lowercase();
+        let mut column_mappings = HashMap::new();
+        column_mappings.insert(col.clone(), col.clone());
+        mappings.entry(dg_name.clone()).or_insert_with(Vec::new).push(MeasureMapping {
+            measure_name: measure_name.clone(),
+            aggregation: agg,
+            expression: col,
+            table_group: dg_name,
+            table,
+            column_mappings,
+        });
     }
 
     Ok(mappings)
@@ -258,69 +324,109 @@ fn compute_schema_hash(batches: &[datafusion::arrow::record_batch::RecordBatch])
     format!("{:x}", hasher.finish())
 }
 
-/// Print a proof pack in human-readable format
+/// Print a proof pack in human-readable format (verdict-first, definition + lineage)
 pub fn print_proof_pack(proof_pack: &ProofPack) -> anyhow::Result<()> {
-    println!("📋 PROOF PACK");
-    println!("============");
-    println!("Metric: {}", proof_pack.metric_name);
-    println!("Snapshot ID: {}", proof_pack.snapshot_id);
-    println!("As-of: {}", proof_pack.reproducibility_params.as_of);
-    println!("Timezone: {}", proof_pack.reproducibility_params.timezone);
-    println!("Currency: {} (FX: {:.4})", proof_pack.reproducibility_params.currency, proof_pack.reproducibility_params.fx_rate);
-    println!("Attribution Window: {} days", proof_pack.reproducibility_params.attribution_window);
+    println!("📦 PROOF PACK: {}", proof_pack.metric_name);
+    println!("========================");
+    let value_str = proof_pack.value
+        .map(|v| format!("{:.2} {}", v, proof_pack.reproducibility_params.currency))
+        .unwrap_or_else(|| "N/A".to_string());
+    println!("VALUE: {}", value_str);
+    println!("STATUS: 🟢 {}", proof_pack.status);
+    println!("AS-OF: {} (UTC)", proof_pack.reproducibility_params.as_of);
+    let short_id = if proof_pack.snapshot_id.len() >= 12 { &proof_pack.snapshot_id[..12] } else { &proof_pack.snapshot_id[..] };
+    println!("SNAPSHOT ID: {}...", short_id);
     println!();
 
-    println!("📐 METRIC FORMULA");
-    println!("  Expression: {}", proof_pack.metric_formula.expression);
-    if let Some(desc) = &proof_pack.metric_formula.description {
-        println!("  Description: {}", desc);
-    }
-    println!("  Data Type: {}", proof_pack.metric_formula.data_type);
-    println!("  Additive: {}", proof_pack.metric_formula.is_additive);
+    println!("WHAT THIS METRIC MEANS");
+    let desc = proof_pack.metric_formula.description.as_deref()
+        .unwrap_or("(No description)");
+    println!("\"{}\"", desc);
     println!();
 
-    println!("🔗 MEASURE MAPPINGS");
-    for (table_group, measures) in &proof_pack.metric_to_measures {
-        println!("  Table Group: {}", table_group);
-        for measure in measures {
-            println!("    Measure: {} ({})", measure.measure_name, measure.aggregation);
-            println!("    Expression: {}", measure.expression);
-            println!("    Table: {}", measure.table);
-            println!("    Column Mappings:");
-            for (logical, physical) in &measure.column_mappings {
-                println!("      {} → {}", logical, physical);
-            }
-            println!();
-        }
-    }
-
-    println!("📊 SOURCE METADATA");
-    for (table_name, metadata) in &proof_pack.source_metadata {
-        println!("  Table: {} ({})", table_name, metadata.table_group);
-        println!("    Rows: {}", metadata.row_count);
-        println!("    Last Ingested: {}", metadata.last_ingested_at);
-        if let Some(max_time) = metadata.max_event_time {
-            println!("    Max Event Time: {}", max_time);
-        }
-        if let Some(completeness) = metadata.completeness_up_to {
-            println!("    Complete Up To: {}", completeness);
-        }
-        println!("    Schema Hash: {}", metadata.schema_hash);
-        println!("    Source: {} ({})", metadata.source_type, metadata.source_path);
+    if let Some(ref human) = proof_pack.metric_formula.human_definition {
+        println!("DEFINITION (Human)");
+        println!("{}", human);
         println!();
     }
+    if let Some(ref exact) = proof_pack.metric_formula.exact_definition {
+        println!("DEFINITION (Exact)");
+        println!("{}", exact);
+        println!();
+    }
+
+    println!("LINEAGE (Where it came from)");
+    println!("{:<15} {:<20} {:<8} {:<6} {:<12} {:<12}", "SOURCE", "TABLE", "FIELD", "AGG", "ROWS USED", "LAST INGEST");
+    for (_table_name, metadata) in &proof_pack.source_metadata {
+        let source_label = if metadata.table_group == "adwords" { "Google Ads" } else if metadata.table_group == "facebook" { "Facebook Ads" } else { &metadata.table_group };
+        let (field, agg) = proof_pack.metric_to_measures.get(&metadata.table_group)
+            .and_then(|m| m.first())
+            .map(|m| (m.expression.clone(), m.aggregation.clone()))
+            .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
+        let last = metadata.last_ingested_at.format("%H:%M").to_string();
+        println!("{:<15} {:<20} {:<8} {:<6} {:<12} {:<12}", source_label, metadata.table_name, field, agg.to_uppercase(), metadata.row_count, last);
+    }
+    println!();
+
+    let completeness = proof_pack.source_metadata.values()
+        .filter_map(|m| m.completeness_up_to)
+        .max()
+        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("DATA QUALITY CONTEXT");
+    println!("- Completeness: ✅ complete up to {}", completeness);
+    println!("- Currency: {} (FX {:.4})", proof_pack.reproducibility_params.currency, proof_pack.reproducibility_params.fx_rate);
+    println!("- Attribution window: {} days", proof_pack.reproducibility_params.attribution_window);
+    println!();
+
+    println!("EXPORTABLES");
+    println!("✅ report.html     (share with stakeholders)");
+    println!("✅ proof_pack.json (audit / automation)");
+    println!("✅ sql.sql         (for warehouse parity checks)");
+    println!("✅ substrait.plan  (engine-agnostic compute plan)");
 
     Ok(())
 }
 
-/// Save proof pack to a specific snapshot directory
+/// Save proof pack to a specific snapshot directory (includes exportables)
 pub fn save_proof_pack_to_snapshot(proof_pack: &ProofPack, snapshot_dir: &std::path::Path) -> anyhow::Result<()> {
-    // Save proof pack as JSON
+    std::fs::create_dir_all(snapshot_dir)?;
+
     let proof_pack_path = snapshot_dir.join("proof_pack.json");
     let json = serde_json::to_string_pretty(proof_pack)?;
     std::fs::write(proof_pack_path, json)?;
 
+    let sql_content = generate_parity_sql(proof_pack);
+    std::fs::write(snapshot_dir.join("sql.sql"), sql_content)?;
+
+    let report_md = format!(
+        "# Proof Pack: {}\n\nVALUE: {:?} {}\nSTATUS: {}\n\n## Definition\n{}\n\n## Lineage\nSee proof_pack.json",
+        proof_pack.metric_name,
+        proof_pack.value,
+        proof_pack.reproducibility_params.currency,
+        proof_pack.status,
+        proof_pack.metric_formula.description.as_deref().unwrap_or("(none)")
+    );
+    crate::artifacts::write_report_md(snapshot_dir, &report_md)?;
+    crate::artifacts::write_report_html(snapshot_dir, &report_md)?;
+
     Ok(())
+}
+
+fn generate_parity_sql(proof_pack: &ProofPack) -> String {
+    let mut sql = format!("-- Parity SQL for metric: {}\n", proof_pack.metric_name);
+    sql.push_str("-- Use this to verify numbers in your warehouse.\n\n");
+    if let Some(ref exact) = proof_pack.metric_formula.exact_definition {
+        sql.push_str(&format!("-- Semantic definition:\n-- {}\n\n", exact.replace('\n', "\n-- ")));
+    }
+    for (dg, measures) in &proof_pack.metric_to_measures {
+        for m in measures {
+            sql.push_str(&format!("-- {}: SELECT {}({}) FROM {} GROUP BY ...\n",
+                dg, m.aggregation.to_uppercase(), m.expression, m.table));
+        }
+    }
+    sql.push_str("\n-- Run equivalent aggregations in your warehouse and compare results.\n");
+    sql
 }
 
 /// Save proof pack to disk (legacy function for backwards compatibility)

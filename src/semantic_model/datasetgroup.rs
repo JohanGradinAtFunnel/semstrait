@@ -194,6 +194,11 @@ pub struct GroupDataset {
     /// e.g., { "dates.year": 2023 } means this dataset only contains 2023 data
     #[serde(rename = "rowFilter")]
     pub row_filter: Option<HashMap<String, serde_yaml::Value>>,
+    /// Dataset grain: attribute paths that uniquely identify each row
+    /// Used for contract validation to ensure aggregations are semantically correct
+    /// e.g., ["accounts.id", "campaigns.id", "dates.day"] means rows are unique by account+campaign+day
+    #[serde(default)]
+    pub grain: Vec<String>,
 }
 
 impl DatasetGroup {

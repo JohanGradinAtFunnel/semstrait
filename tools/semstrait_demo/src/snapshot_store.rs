@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use chrono::{DateTime, Utc};
 use super::ReproducibilityParams;
+use super::metadata::{InventoryBuilder, InventorySnapshot};
 
 /// A snapshot store that persists all artifacts needed to reproduce a calculation
 pub struct SnapshotStore {
@@ -39,6 +40,7 @@ impl SnapshotStore {
         self.save_request_json(&snapshot_dir, request)?;
         self.save_plan_json(&snapshot_dir, substrait_plan)?;
         self.save_model_yaml(&snapshot_dir, schema)?;
+        self.save_inventory_json(&snapshot_dir, table_paths, &repro_params.as_of).await?;
         self.save_parquet_fixtures(&snapshot_dir, temp_dir, table_paths)?;
 
         Ok(snapshot_dir)
@@ -93,6 +95,23 @@ impl SnapshotStore {
         Ok(())
     }
 
+    /// Compute and save inventory snapshot as JSON
+    async fn save_inventory_json(
+        &self,
+        snapshot_dir: &Path,
+        table_paths: &HashMap<String, String>,
+        as_of: &str,
+    ) -> anyhow::Result<()> {
+        let inventory_path = snapshot_dir.join("inventory.json");
+
+        let builder = InventoryBuilder::new();
+        let inventory = builder.compute_inventory(table_paths, as_of).await?;
+
+        let json = serde_json::to_string_pretty(&inventory)?;
+        fs::write(inventory_path, json)?;
+        Ok(())
+    }
+
     /// Copy Parquet fixtures to snapshot directory
     fn save_parquet_fixtures(
         &self,
@@ -111,79 +130,4 @@ impl SnapshotStore {
         Ok(())
     }
 
-    /// Compute a deterministic data-state fingerprint for hash inclusion
-    pub async fn compute_data_fingerprint(
-        &self,
-        table_paths: &HashMap<String, String>,
-    ) -> anyhow::Result<String> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        use datafusion::prelude::*;
-
-        let mut hasher = DefaultHasher::new();
-
-        // Include row counts and schema hashes for each table
-        for (table_name, path) in table_paths {
-            let ctx = SessionContext::new();
-            let df = ctx.read_parquet(path, Default::default()).await?;
-            let batches = df.clone().collect().await?;
-
-            let row_count = batches.iter().map(|b| b.num_rows()).sum::<usize>();
-            let schema_hash = compute_schema_hash(&batches);
-
-            // Include max event_time if available
-            let max_event_time: Option<DateTime<Utc>> = find_max_event_time(&df).await?;
-            let max_event_timestamp = max_event_time
-                .map(|dt| dt.timestamp())
-                .unwrap_or(0);
-
-            // Hash table metadata
-            table_name.hash(&mut hasher);
-            row_count.hash(&mut hasher);
-            schema_hash.hash(&mut hasher);
-            max_event_timestamp.hash(&mut hasher);
-        }
-
-        Ok(format!("{:x}", hasher.finish()))
-    }
-}
-
-/// Compute a hash of the schema for change detection
-fn compute_schema_hash(batches: &[datafusion::arrow::record_batch::RecordBatch]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-
-    if let Some(first_batch) = batches.first() {
-        let schema = first_batch.schema();
-        for field in schema.fields() {
-            field.name().hash(&mut hasher);
-            format!("{:?}", field.data_type()).hash(&mut hasher);
-        }
-    }
-
-    format!("{:x}", hasher.finish())
-}
-
-/// Find maximum event_time from a DataFrame
-async fn find_max_event_time(df: &datafusion::dataframe::DataFrame) -> anyhow::Result<Option<DateTime<Utc>>> {
-    // Look for event_time_utc column and find max
-    if let Ok(max_time_col) = df.clone().select_columns(&["event_time_utc"]) {
-        if let Ok(max_time_df) = max_time_col.aggregate(vec![], vec![
-            datafusion::functions_aggregate::expr_fn::max(datafusion::logical_expr::col("event_time_utc"))
-        ]) {
-            let batches = max_time_df.collect().await?;
-            if let Some(batch) = batches.first() {
-                if let Some(col) = batch.column_by_name("max(event_time_utc)") {
-                    if let Some(timestamp_array) = col.as_any().downcast_ref::<datafusion::arrow::array::TimestampMicrosecondArray>() {
-                        if let Some(max_ts) = timestamp_array.value(0).into() {
-                            return Ok(Some(DateTime::from_timestamp_micros(max_ts).unwrap_or(Utc::now())));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(None)
 }

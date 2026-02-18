@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 use std::path::Path;
-use super::dimension::Dimension;
+use super::dimension::{Dimension, ContractMode};
 use super::measure::Measure;
 use super::metric::Metric;
 use super::datasetgroup::{DatasetGroup, GroupDataset};
@@ -15,7 +15,7 @@ pub struct Schema {
 }
 
 /// A semantic model - the queryable business entity
-/// 
+///
 /// Contains one or more dataset groups that share dimension and measure definitions.
 /// The selector picks the optimal dataset based on query requirements.
 #[derive(Debug, Deserialize)]
@@ -34,6 +34,16 @@ pub struct SemanticModel {
     /// Row-level security filter
     #[serde(rename = "dataFilter")]
     pub data_filter: Option<Vec<DataFilter>>,
+    /// Contract enforcement for semantic correctness guarantees
+    #[serde(default)]
+    pub contract: Option<ContractConfig>,
+}
+
+/// Contract configuration for semantic correctness guarantees
+#[derive(Debug, Deserialize)]
+pub struct ContractConfig {
+    /// Contract enforcement mode
+    pub mode: ContractMode,
 }
 
 /// Row-level security filter
@@ -171,7 +181,7 @@ impl SemanticModel {
     }
     
     /// Check if all dimension attributes in a query can use the cross-datasetGroup UNION path
-    /// 
+    ///
     /// Returns true if all dimensions are either:
     /// - Virtual dimensions (like `_dataset`) - implicitly work across datasetGroups
     /// - Model-level dimensions - defined at model.dimensions, queryable with 2-part paths
@@ -179,7 +189,7 @@ impl SemanticModel {
         if dimension_attrs.is_empty() {
             return false;
         }
-        
+
         dimension_attrs.iter().all(|dim_attr| {
             let parts: Vec<&str> = dim_attr.split('.').collect();
             if parts.len() != 2 {
@@ -188,5 +198,20 @@ impl SemanticModel {
             // Check if dimension exists at model level (includes virtual dimensions)
             self.get_dimension(parts[0]).is_some()
         })
+    }
+
+    /// Get the contract configuration (defaults to off if not specified)
+    pub fn contract(&self) -> ContractMode {
+        self.contract.as_ref().map(|c| c.mode).unwrap_or(ContractMode::Off)
+    }
+
+    /// Check if contract is in strict mode
+    pub fn contract_strict(&self) -> bool {
+        matches!(self.contract(), ContractMode::Strict)
+    }
+
+    /// Check if contract is in warn mode
+    pub fn contract_warn(&self) -> bool {
+        matches!(self.contract(), ContractMode::Warn)
     }
 }

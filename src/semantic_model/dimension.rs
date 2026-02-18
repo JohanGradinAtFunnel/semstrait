@@ -4,6 +4,33 @@ use serde::Deserialize;
 use super::types::DataType;
 use super::datasetgroup::Source;
 
+/// Contract enforcement mode for semantic correctness guarantees
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContractMode {
+    /// No contract enforcement (backward compatibility)
+    Off,
+    /// Warn on contract violations but allow them
+    Warn,
+    /// Strictly enforce contract (block violations)
+    Strict,
+}
+
+/// Join relationship/cardinality between fact and dimension tables
+/// Used for contract validation to prevent double counting
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinRelationship {
+    /// Many fact rows → 1 dimension row (safe for aggregations)
+    ManyToOne,
+    /// 1 fact row → 1 dimension row (safest)
+    OneToOne,
+    /// 1 fact row → many dimension rows (dangerous, can multiply rows)
+    OneToMany,
+    /// Many fact rows → many dimension rows (most dangerous)
+    ManyToMany,
+}
+
 /// A dimension definition with its attributes
 /// 
 /// Can be either a regular dimension (with physical table) or a virtual dimension
@@ -35,6 +62,9 @@ pub struct Join {
     pub right_key: String,
     #[serde(rename = "rightAlias")]
     pub right_alias: Option<String>,
+    /// Join relationship/cardinality for contract validation
+    /// Required in strict contract mode to prevent double counting
+    pub relationship: Option<JoinRelationship>,
 }
 
 /// An attribute (column) within a dimension
@@ -50,6 +80,11 @@ pub struct Attribute {
     /// Data type. Defaults to String if not specified.
     #[serde(rename = "type", default)]
     pub data_type: DataType,
+    /// Identity scope constraints: this attribute's uniqueness is scoped by these other attributes
+    /// Example: ["accounts.id"] means campaign.id is only unique within each account
+    /// Used for contract validation to prevent ambiguous identity resolution
+    #[serde(rename = "scopedBy", default)]
+    pub scoped_by: Vec<String>,
 }
 
 impl Dimension {

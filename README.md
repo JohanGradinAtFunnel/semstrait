@@ -19,7 +19,7 @@ YAML Schema → semstrait → Substrait Plan → Any Engine
 ## Features
 
 - **Semantic Modeling** — Define dimensions, measures, metrics, and joins in YAML
-- **Query Resolution** — Resolve business queries against the semantic model  
+- **Query Resolution** — Resolve business queries against the semantic model
 - **Logical Planning** — Generate optimized relational algebra plans
 - **Substrait Output** — Emit portable compute plans for any Substrait-compatible engine
 - **Dataset Groups** — Multiple data sources (e.g., Google Ads, Facebook Ads) in one model
@@ -27,6 +27,11 @@ YAML Schema → semstrait → Substrait Plan → Any Engine
 - **Virtual Dimensions** — Metadata dimensions (like `_dataset`) with no physical table
 - **Degenerate Dimensions** — Support for fact table columns as dimension attributes
 - **Metrics** — Derived calculations from measures (e.g., `revenue / quantity`)
+- **Semantic Contracts** — Guarantee correctness through enforceable rules:
+  - **Identity Scoping** — IDs are unique within defined parent scopes
+  - **Join Safety** — Explicit relationship constraints prevent double counting
+  - **Dataset Grain** — Declare row uniqueness to validate aggregations
+  - **Aggregation Rules** — Block unsafe cross-dataset rollups (e.g., `COUNT_DISTINCT`)
 - **Lightweight** — Pure Rust library, no runtime server required
 
 ## Example

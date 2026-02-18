@@ -3,21 +3,23 @@ semantic_models:
     namespace: "demo"
     label: "Marketing Analytics Demo"
     description: "Demo semantic model showing UNION across datasetGroups"
+    contract:
+      mode: strict
 
     # Virtual dimension for table metadata
     dimensions:
-      - name: _table
+      - name: _dataset
         virtual: true
-        label: "Table Metadata"
-        description: "Metadata about the table and model"
+        label: "Dataset Metadata"
+        description: "Metadata about the dataset and model"
         attributes:
           - name: model
             type: string
           - name: namespace
             type: string
-          - name: tableGroup
+          - name: datasetGroup
             type: string
-          - name: table
+          - name: dataset
             type: string
 
       # Grain dimensions for diff analysis
@@ -47,6 +49,7 @@ semantic_models:
             type: i64
             label: "Campaign ID"
             description: "Campaign identifier"
+            scopedBy: ["accounts.id"]
 
       - name: ads
         label: "Ad Dimensions"
@@ -56,6 +59,7 @@ semantic_models:
             type: i64
             label: "Ad ID"
             description: "Ad identifier"
+            scopedBy: ["campaigns.id"]
 
       - name: users
         label: "User Dimensions"
@@ -71,11 +75,19 @@ semantic_models:
       - name: adwords
         label: "AdWords Campaigns"
         dimensions:
-          - name: _table
+          - name: _dataset
           - name: dates
           - name: accounts
           - name: campaigns
+            join:
+              leftKey: account_id
+              rightKey: id
+              relationship: many_to_one
           - name: ads
+            join:
+              leftKey: campaign_id
+              rightKey: id
+              relationship: many_to_one
         measures:
           - name: cost
             aggregation: sum
@@ -97,8 +109,9 @@ semantic_models:
             source:
               type: parquet
               path: "/tmp/adwords_campaigns.parquet"  # Will be overridden in demo
+            grain: ["dates.day", "accounts.account_id", "campaigns.campaign_id", "ads.ad_id"]
             dimensions:
-              _table: [model, namespace, tableGroup, table]
+              _dataset: [model, namespace, datasetGroup, dataset]
               dates: [day]
               accounts: [account_id]
               campaigns: [campaign_id]
@@ -110,11 +123,19 @@ semantic_models:
       - name: facebook
         label: "Facebook Campaigns"
         dimensions:
-          - name: _table
+          - name: _dataset
           - name: dates
           - name: accounts
           - name: campaigns
+            join:
+              leftKey: account_id
+              rightKey: id
+              relationship: many_to_one
           - name: ads
+            join:
+              leftKey: campaign_id
+              rightKey: id
+              relationship: many_to_one
         measures:
           - name: spend
             aggregation: sum
@@ -136,8 +157,9 @@ semantic_models:
             source:
               type: parquet
               path: "/tmp/facebook_campaigns.parquet"  # Will be overridden in demo
+            grain: ["dates.day", "accounts.account_id", "campaigns.campaign_id", "ads.ad_id"]
             dimensions:
-              _table: [model, namespace, tableGroup, table]
+              _dataset: [model, namespace, datasetGroup, dataset]
               dates: [day]
               accounts: [account_id]
               campaigns: [campaign_id]
@@ -193,3 +215,40 @@ semantic_models:
                   eq: [datasetGroup.name, "facebook"]
                 then: user_id
             else: 0
+
+# ================================================================================
+# MESSY ALIGNMENT FIX EXAMPLE (uncomment to test impact analysis)
+# ================================================================================
+#
+# To demonstrate fixing the "Attribution & Tax Mismatch" scenario, you can:
+# 1. Uncomment the measure and metric below
+# 2. Run: semstrait impact --proposed-model tools/semstrait_demo/messy_alignment_fix.yaml --scenario messy_alignment
+#
+# This shows how to include tax_amount in the total_cost calculation.
+#
+#    measures:
+#      # Add to facebook datasetGroup
+#      - name: tax_amount
+#        aggregation: sum
+#        expr:
+#          coalesce: [tax_amount, 0]  # Safe handling of NULL tax_amount
+#        type: f64
+#        label: "Facebook Tax Amount"
+#
+#    metrics:
+#      # Update total_cost to include taxes
+#      - name: total_cost_corrected
+#        type: f64
+#        label: "Total Marketing Cost (Tax Included)"
+#        description: "Combined cost across all channels, including platform taxes/fees"
+#        expr:
+#          case:
+#            when:
+#              - condition:
+#                  eq: [datasetGroup.name, "adwords"]
+#                then: cost
+#              - condition:
+#                  eq: [datasetGroup.name, "facebook"]
+#                then:
+#                  add: [spend, tax_amount]  # Include tax_amount in calculation
+#            else: 0

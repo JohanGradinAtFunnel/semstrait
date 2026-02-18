@@ -8,6 +8,8 @@ pub enum PlanError {
     EmptyQuery,
     /// Invalid query configuration
     InvalidQuery(String),
+    /// Contract violation blocks planning
+    ContractViolation(String),
 }
 
 impl fmt::Display for PlanError {
@@ -18,6 +20,9 @@ impl fmt::Display for PlanError {
             }
             PlanError::InvalidQuery(msg) => {
                 write!(f, "Invalid query: {}", msg)
+            }
+            PlanError::ContractViolation(msg) => {
+                write!(f, "Contract violation: {}", msg)
             }
         }
     }

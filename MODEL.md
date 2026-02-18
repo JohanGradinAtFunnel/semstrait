@@ -63,6 +63,55 @@ semantic_models:
     metrics: [...]                  # Derived calculations (model-level)
     datasetGroups: [...]             # Groups of datasets sharing field definitions
     dataFilter: [...]               # Row-level security (optional)
+    contract: {...}                 # Semantic correctness guarantees (optional)
+```
+
+### Semantic Contracts
+
+Contracts enforce correctness guarantees to prevent double counting and ambiguous identity resolution:
+
+```yaml
+contract:
+  mode: strict  # off|warn|strict - enforcement level
+```
+
+#### Identity Scoping
+
+Attributes can declare scope constraints to ensure uniqueness:
+
+```yaml
+dimensions:
+  - name: campaigns
+    attributes:
+      - name: id
+        type: i64
+        scopedBy: ["accounts.id"]  # campaign.id is only unique within accounts
+```
+
+#### Join Relationships
+
+Joins must declare cardinality for safety:
+
+```yaml
+datasetGroups:
+  - name: adwords
+    dimensions:
+      - name: campaigns
+        join:
+          leftKey: account_id
+          rightKey: id
+          relationship: many_to_one  # Prevents double counting in aggregations
+```
+
+#### Dataset Grain
+
+Datasets declare their uniqueness constraints:
+
+```yaml
+datasets:
+  - dataset: adwords_campaigns
+    grain: ["dates.day", "accounts.id", "campaigns.id", "ads.id"]
+    # Rows are unique by this combination - validates aggregation safety
 ```
 
 ### Dimension Definition

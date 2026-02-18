@@ -18,3 +18,7 @@ serde_yaml = "0.9"
 # Substrait
 substrait = { version = "0.62", features = ["serde"] }
 prost = "0.13"
+
+[[bin]]
+name = "clean-repo"
+path = "clean.rs"

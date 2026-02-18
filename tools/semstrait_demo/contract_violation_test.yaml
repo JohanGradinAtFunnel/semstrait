@@ -1,0 +1,146 @@
+semantic_models:
+  - name: "marketing-demo"
+    namespace: "demo"
+    label: "Contract Violation Demo"
+    description: "Demo model that intentionally violates semantic contracts"
+    contract:
+      mode: strict
+
+    # Virtual dimension for table metadata
+    dimensions:
+      - name: _dataset
+        virtual: true
+        label: "Dataset Metadata"
+        description: "Metadata about the dataset and model"
+        attributes:
+          - name: model
+            type: string
+          - name: namespace
+            type: string
+          - name: datasetGroup
+            type: string
+          - name: dataset
+            type: string
+
+      # Grain dimensions for diff analysis
+      - name: dates
+        label: "Date Dimensions"
+        description: "Date-based grouping dimensions"
+        attributes:
+          - name: day
+            type: string
+            label: "Day"
+
+      - name: accounts
+        label: "Account Dimensions"
+        description: "Account-based grouping dimensions"
+        attributes:
+          - name: id
+            type: i64
+            label: "Account ID"
+            description: "Account identifier"
+
+      - name: campaigns
+        label: "Campaign Dimensions"
+        description: "Campaign-based grouping dimensions"
+        attributes:
+          - name: id
+            type: i64
+            label: "Campaign ID"
+            description: "Campaign identifier"
+            # This creates the identity scope constraint: campaign.id only unique within account.id
+            scopedBy: ["accounts.id"]
+
+    # Metrics are model-level (shared across all table groups)
+    metrics:
+      # Pass-through metrics expose measures as queryable
+      - name: total_cost
+        label: "Total Cost"
+        type: f64
+        expr:
+          case:
+            when:
+              - condition:
+                  eq: [datasetGroup.name, "adwords"]
+                then: cost
+              - condition:
+                  eq: [datasetGroup.name, "facebook"]
+                then: spend
+            else: 0
+
+    dataFilter:
+      - field: dates.day
+        userAttribute: allowedDates
+
+    # Table groups that can serve this model
+    datasetGroups:
+      - name: adwords
+        label: "AdWords Campaigns"
+        dimensions:
+          - name: _dataset
+          - name: dates
+          - name: accounts
+          - name: campaigns
+            join:
+              leftKey: account_id
+              rightKey: id
+              relationship: many_to_one  # Explicit safe relationship
+        measures:
+          - name: cost
+            aggregation: sum
+            expr: cost
+            type: f64
+            label: "AdWords Cost"
+          - name: impressions
+            aggregation: sum
+            expr: impressions
+            type: i64
+            label: "AdWords Impressions"
+        datasets:
+          - dataset: "adwords_campaigns"
+            source:
+              type: parquet
+              path: "/tmp/adwords_campaigns.parquet"  # Will be overridden in demo
+            grain: ["dates.day", "accounts.account_id", "campaigns.campaign_id"]
+            dimensions:
+              _dataset: [model, namespace, datasetGroup, dataset]
+              dates: [day]
+              accounts: [account_id]  # Note: physical column name
+              campaigns: [campaign_id]  # Note: physical column name
+            measures: [cost, impressions]
+
+      # Facebook tableGroup
+      - name: facebook
+        label: "Facebook Campaigns"
+        dimensions:
+          - name: _dataset
+          - name: dates
+          - name: accounts
+          - name: campaigns
+            join:
+              leftKey: account_id
+              rightKey: id
+              relationship: many_to_one  # Explicit safe relationship
+        measures:
+          - name: spend
+            aggregation: sum
+            expr: spend
+            type: f64
+            label: "Facebook Spend"
+          - name: impressions
+            aggregation: sum
+            expr: impressions
+            type: i64
+            label: "Facebook Impressions"
+        datasets:
+          - dataset: "facebook_campaigns"
+            source:
+              type: parquet
+              path: "/tmp/facebook_campaigns.parquet"  # Will be overridden in demo
+            grain: ["dates.day", "accounts.account_id", "campaigns.campaign_id"]
+            dimensions:
+              _dataset: [model, namespace, datasetGroup, dataset]
+              dates: [day]
+              accounts: [account_id]  # Note: physical column name
+              campaigns: [campaign_id]  # Note: physical column name
+            measures: [spend, impressions]

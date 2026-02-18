@@ -1,8 +1,8 @@
 semantic_models:
   - name: "marketing-demo"
     namespace: "demo"
-    label: "Marketing Analytics Demo (Proposed Changes)"
-    description: "Demo semantic model with proposed changes"
+    label: "Marketing Analytics Demo (Tax Included)"
+    description: "Demo semantic model with corrected tax handling for messy_alignment scenario"
 
     # Virtual dimension for table metadata
     dimensions:
@@ -67,7 +67,7 @@ semantic_models:
             description: "User identifier"
 
     datasetGroups:
-      # AdWords tableGroup
+      # AdWords tableGroup (unchanged)
       - name: adwords
         label: "AdWords Campaigns"
         dimensions:
@@ -106,9 +106,9 @@ semantic_models:
               users: [user_id]
             measures: [cost, impressions, user_id]
 
-      # Facebook tableGroup - with proposed changes!
+      # Facebook tableGroup (with tax_amount measure added)
       - name: facebook
-        label: "Facebook Campaigns (Updated)"
+        label: "Facebook Campaigns"
         dimensions:
           - name: _dataset
           - name: dates
@@ -116,12 +116,19 @@ semantic_models:
           - name: campaigns
           - name: ads
         measures:
-          # PROPOSED CHANGE: Different aggregation for spend (was sum, now avg)
           - name: spend
-            aggregation: avg  # Changed from sum to avg!
+            aggregation: sum
             expr: spend
             type: f64
-            label: "Facebook Spend (Average)"
+            label: "Facebook Spend"
+          # NEW: tax_amount measure using coalesce for safe NULL handling
+          - name: tax_amount
+            aggregation: sum
+            expr:
+              coalesce: [tax_amount, 0]  # Safe handling of NULL tax_amount
+            type: f64
+            label: "Facebook Tax Amount"
+            description: "Platform taxes and fees, safely handling NULL values"
           - name: impressions
             aggregation: sum
             expr: impressions
@@ -144,14 +151,14 @@ semantic_models:
               campaigns: [campaign_id]
               ads: [ad_id]
               users: [user_id]
-            measures: [spend, impressions, user_id]
+            measures: [spend, tax_amount, impressions, user_id]
 
     metrics:
-      # Total cost metric that combines adwords.cost and facebook.spend
+      # CORRECTED: Total cost metric that includes taxes for Facebook
       - name: total_cost
         type: f64
-        label: "Total Marketing Cost"
-        description: "Combined cost across all marketing channels"
+        label: "Total Marketing Cost (Tax Included)"
+        description: "Combined cost across all marketing channels, including platform taxes/fees"
         expr:
           case:
             when:
@@ -160,10 +167,11 @@ semantic_models:
                 then: cost
               - condition:
                   eq: [datasetGroup.name, "facebook"]
-                then: spend  # This will now be AVG instead of SUM!
+                then:
+                  add: [spend, tax_amount]  # Include tax_amount in calculation
             else: 0
 
-      # Total impressions metric
+      # Total impressions metric (unchanged)
       - name: total_impressions
         type: i64
         label: "Total Impressions"
@@ -179,7 +187,7 @@ semantic_models:
                 then: impressions
             else: 0
 
-      # Total unique users metric
+      # Total unique users metric (unchanged)
       - name: total_unique_users
         type: i64
         label: "Total Unique Users"

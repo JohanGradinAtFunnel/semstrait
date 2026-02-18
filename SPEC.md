@@ -18,8 +18,9 @@
 4. [Dataset Groups](#dataset-groups)
 5. [Measures](#measures)
 6. [Metrics](#metrics)
-7. [Query Request](#query-request)
-8. [Examples](#examples)
+7. [Semantic Contracts](#semantic-contracts)
+8. [Query Request](#query-request)
+9. [Examples](#examples)
 
 ---
 
@@ -55,6 +56,27 @@ Supported aggregation functions for measures.
 | `CountDistinct` | `count_distinct`, `distinct_count` | Count of distinct values |
 | `Min` | `min`, `minimum` | Minimum value |
 | `Max` | `max`, `maximum` | Maximum value |
+
+### Contract Mode
+
+Enforcement mode for semantic correctness guarantees.
+
+| Mode | YAML | Description |
+|------|------|-------------|
+| `Off` | `off` | No contract enforcement (backward compatibility) |
+| `Warn` | `warn` | Warn on contract violations but allow them |
+| `Strict` | `strict` | Strictly enforce contract (block violations) |
+
+### Join Relationships
+
+Cardinality constraints for joins to prevent double counting.
+
+| Relationship | YAML | Description |
+|--------------|------|-------------|
+| `ManyToOne` | `many_to_one` | Many fact rows → 1 dimension row (safe for aggregations) |
+| `OneToOne` | `one_to_one` | 1 fact row → 1 dimension row (safest) |
+| `OneToMany` | `one_to_many` | 1 fact row → many dimension rows (dangerous, can multiply rows) |
+| `ManyToMany` | `many_to_many` | Many fact rows → many dimension rows (most dangerous) |
 
 ### Expression Operators
 
@@ -365,6 +387,82 @@ Metrics are the public query interface. They can be pass-through (exposing a mea
           then: media_spend
       else: 0
 ```
+
+---
+
+## Semantic Contracts
+
+Semantic contracts enforce correctness guarantees to prevent double counting and ambiguous identity resolution. Contracts are configured per model and can be `off` (no enforcement), `warn` (log violations), or `strict` (block violations).
+
+### Model-Level Contract
+
+```yaml
+semantic_models:
+  - name: "marketing"
+    contract:
+      mode: strict  # off|warn|strict
+```
+
+### Identity Scoping
+
+Attributes can be scoped to parent entities, requiring that scoped attributes are only queried within their defined scope.
+
+```yaml
+dimensions:
+  - name: campaigns
+    attributes:
+      - name: id
+        type: i64
+        scopedBy: ["accounts.id"]  # campaign.id is only unique within each account
+```
+
+**Enforcement:** Queries using `campaigns.id` must include `accounts.id` in rows, columns, or filters.
+
+### Join Relationships
+
+Joins must declare their cardinality to prevent unsafe aggregations that can double-count.
+
+```yaml
+datasetGroups:
+  - name: "adwords"
+    dimensions:
+      - name: campaigns
+        join:
+          leftKey: account_id
+          rightKey: id
+          relationship: many_to_one  # Required in strict mode
+```
+
+**Relationships:**
+- `many_to_one`: Many fact rows → 1 dimension row (safe for aggregations)
+- `one_to_one`: 1 fact row → 1 dimension row (safest)
+- `one_to_many`: 1 fact row → many dimension rows (dangerous - can multiply rows)
+- `many_to_many`: Many fact rows → many dimension rows (most dangerous)
+
+**Enforcement:** `one_to_many` and `many_to_many` relationships block queries requiring joins with distributive aggregations.
+
+### Dataset Grain
+
+Datasets must declare their uniqueness grain to validate aggregation semantics.
+
+```yaml
+datasets:
+  - dataset: "adwords_campaigns"
+    grain: ["dates.day", "accounts.id", "campaigns.id", "ads.id"]
+    # Rows are unique by this combination of attributes
+```
+
+**Enforcement:** Cross-datasetGroup rollups validate that holistic aggregations (`count_distinct`) are not used unsafely.
+
+### Aggregation Semantics
+
+Aggregations are classified by their rollup behavior:
+
+- **Distributive**: Can be safely combined across datasets (`sum`, `count`, `min`, `max`)
+- **Algebraic**: Cannot be safely combined without additional math (`avg`)
+- **Holistic**: Cannot be safely combined (`count_distinct`)
+
+**Enforcement:** Cross-datasetGroup metrics using holistic aggregations are blocked in strict mode.
 
 ---
 

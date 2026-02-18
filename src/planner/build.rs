@@ -10,6 +10,8 @@ use crate::plan::{
 use crate::resolver::{ResolvedQuery, AttributeRef, ResolvedFilter, ResolvedDimension, resolve_query};
 use crate::selector::{select_datasets, select_datasets_for_join, SelectedDataset, MultiDatasetSelection};
 use crate::query::QueryRequest;
+use crate::validator::{validate_model_schema, validate_resolved_query, ValidationResult};
+use crate::validator::ViolationSeverity;
 use super::error::PlanError;
 
 /// Determine if a table needs a join for a given dimension
@@ -192,17 +194,17 @@ pub fn plan_query(resolved: &ResolvedQuery<'_>) -> Result<PlanNode, PlanError> {
 }
 
 /// Plan a semantic query, automatically handling both single-datasetGroup and cross-datasetGroup cases
-/// 
+///
 /// This is the main entry point for query planning. It:
 /// 1. Analyzes the requested metrics to detect cross-tableGroup metrics
 /// 2. Routes to `plan_cross_dataset_group_query` for cross-tableGroup metrics
 /// 3. Routes to normal select → resolve → plan flow for single-tableGroup queries
-/// 
+///
 /// # Arguments
 /// * `schema` - The schema containing models and dimensions
 /// * `model` - The model to query
 /// * `request` - The query request with dimensions, metrics, and filters
-/// 
+///
 /// # Returns
 /// A `PlanNode` that can be emitted to Substrait
 pub fn plan_semantic_query(
@@ -210,6 +212,9 @@ pub fn plan_semantic_query(
     model: &SemanticModel,
     request: &QueryRequest,
 ) -> Result<PlanNode, PlanError> {
+    // Validate model schema for contract compliance
+    let model_validation = validate_model_schema(model);
+    handle_validation_result(&model_validation)?;
     // Build dimension list from rows + columns
     let mut dimension_attrs: Vec<String> = Vec::new();
     if let Some(ref rows) = request.rows {
@@ -284,7 +289,11 @@ pub fn plan_semantic_query(
                 // Resolve the query
                 let resolved = resolve_query(schema, request, &selected)
                     .map_err(|e| PlanError::InvalidQuery(format!("Query resolution error: {:?}", e)))?;
-                
+
+                // Validate resolved query for contract compliance
+                let query_validation = validate_resolved_query(model, &resolved);
+                handle_validation_result(&query_validation)?;
+
                 // Build the plan
                 plan_query(&resolved)
             }
@@ -301,6 +310,11 @@ pub fn plan_semantic_query(
                     };
                     let resolved = resolve_query(schema, request, &selected)
                         .map_err(|e| PlanError::InvalidQuery(format!("Query resolution error: {:?}", e)))?;
+
+                    // Validate resolved query for contract compliance
+                    let query_validation = validate_resolved_query(model, &resolved);
+                    handle_validation_result(&query_validation)?;
+
                     plan_query(&resolved)
                 } else {
                     // Multiple tables needed - use JOIN path
@@ -575,6 +589,10 @@ fn convert_expr_node(node: &ExprNode) -> Expr {
             Expr::Divide(Box::new(left), Box::new(right))
         }
         ExprNode::Case(case_expr) => convert_case_expr(case_expr),
+        ExprNode::Coalesce(args) => {
+            let exprs: Vec<Expr> = args.iter().map(convert_expr_arg).collect();
+            Expr::Coalesce(exprs)
+        }
     }
 }
 
@@ -780,8 +798,8 @@ fn collect_measure_columns(
 
 /// Collect column names from an expression node
 fn collect_node_columns(
-    node: &ExprNode, 
-    fallback_type: &DataType, 
+    node: &ExprNode,
+    fallback_type: &DataType,
     table: &GroupDataset,
     dataset_group: &DatasetGroup,
     columns: &mut HashMap<String, String>
@@ -792,7 +810,7 @@ fn collect_node_columns(
             columns.entry(name.clone()).or_insert(col_type);
         }
         ExprNode::Literal(_) => {}
-        ExprNode::Add(args) | ExprNode::Subtract(args) | ExprNode::Multiply(args) | ExprNode::Divide(args) => {
+        ExprNode::Add(args) | ExprNode::Subtract(args) | ExprNode::Multiply(args) | ExprNode::Divide(args) | ExprNode::Coalesce(args) => {
             for arg in args {
                 collect_arg_columns(arg, fallback_type, table, dataset_group, columns);
             }
@@ -2266,6 +2284,10 @@ pub fn plan_multi_cross_dataset_group_query<'a>(
     metrics: &[&'a Metric],
     dimension_attrs: &[String],
 ) -> Result<PlanNode, PlanError> {
+    // Validate model schema for contract compliance
+    let model_validation = validate_model_schema(model);
+    handle_validation_result(&model_validation)?;
+
     // Validate tableGroup-qualified dimensions
     for attr_path in dimension_attrs {
         let parts: Vec<&str> = attr_path.split('.').collect();
@@ -2780,6 +2802,10 @@ pub fn plan_cross_dataset_group_query<'a>(
     metric: &'a Metric,
     dimension_attrs: &[String],
 ) -> Result<PlanNode, PlanError> {
+    // Validate model schema for contract compliance
+    let model_validation = validate_model_schema(model);
+    handle_validation_result(&model_validation)?;
+
     // Validate tableGroup-qualified dimensions
     for attr_path in dimension_attrs {
         let parts: Vec<&str> = attr_path.split('.').collect();
@@ -3538,6 +3564,35 @@ fn get_dimension_column_name(
     attr_name.to_string()
 }
 
+/// Handle validation result by converting violations to PlanError
+fn handle_validation_result(result: &ValidationResult) -> Result<(), PlanError> {
+    if result.violations.is_empty() {
+        return Ok(());
+    }
+
+    // Check if there are any error-level violations
+    let error_violations: Vec<_> = result.violations.iter()
+        .filter(|v| matches!(v.severity, ViolationSeverity::Error))
+        .collect();
+
+    if !error_violations.is_empty() {
+        // In strict mode or with errors, block planning
+        let messages: Vec<String> = error_violations.iter()
+            .map(|v| format!("{}: {}", v.kind, v.message))
+            .collect();
+        return Err(PlanError::ContractViolation(messages.join("; ")));
+    }
+
+    // For warning-level violations, just log them (warnings are informational)
+    for violation in &result.violations {
+        if matches!(violation.severity, ViolationSeverity::Warning) {
+            eprintln!("⚠️  Contract warning: {} - {}", violation.message, violation.context);
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3913,6 +3968,32 @@ mod tests {
             }
             _ => panic!("Expected Sort node at top level"),
         }
+    }
+
+    #[test]
+    fn test_plan_multiple_cross_dataset_group_metrics() {
+        // Test that multiple cross-datasetGroup metrics can be planned without falling back to JOIN
+        let schema = Schema::from_file("test_data/marketing.yaml").unwrap();
+        let model = schema.get_model("-ObDoDFVQGxxCGa5vw_Z").unwrap();
+
+        // Get two cross-datasetGroup metrics
+        let fun_cost = model.get_metric("fun-cost").unwrap();
+        let fun_impressions = model.get_metric("fun-impressions").unwrap();
+
+        assert!(fun_cost.is_cross_dataset_group());
+        assert!(fun_impressions.is_cross_dataset_group());
+
+        // Create a request with both cross-datasetGroup metrics
+        let request = QueryRequest {
+            model: model.name.clone(),
+            rows: Some(vec!["dates.date".to_string()]),
+            metrics: Some(vec!["fun-cost".to_string(), "fun-impressions".to_string()]),
+            ..Default::default()
+        };
+
+        // This should plan successfully without falling back to JOIN
+        let result = plan_semantic_query(&schema, model, &request);
+        assert!(result.is_ok(), "Failed to plan multiple cross-datasetGroup metrics: {:?}", result.err());
     }
 
     #[test]

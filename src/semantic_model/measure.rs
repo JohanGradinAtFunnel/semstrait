@@ -31,6 +31,8 @@ pub enum ExprNode {
     Divide(Vec<ExprArg>),
     /// CASE WHEN expression
     Case(CaseExpr),
+    /// COALESCE expression: coalesce: [a, b, c]
+    Coalesce(Vec<ExprArg>),
 }
 
 /// CASE WHEN expression

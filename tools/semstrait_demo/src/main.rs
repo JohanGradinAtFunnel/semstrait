@@ -2,7 +2,6 @@
 
 use clap::{Parser, Subcommand};
 use tempfile::TempDir;
-// DataFusion integration
 use datafusion::prelude::*;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
@@ -17,6 +16,47 @@ mod health;
 mod proof_pack;
 mod snapshot_store;
 mod reconcile;
+mod artifacts;
+mod incident;
+mod dictionary;
+mod lookup;
+mod metadata;
+
+/// Shared reproducibility and scope options (used by incident and other commands)
+#[derive(Debug, Clone, Parser)]
+pub struct CommonOptions {
+    /// As-of timestamp for reproducibility (ISO 8601 format)
+    #[arg(long, default_value = "2024-01-01T00:00:00Z")]
+    pub as_of: String,
+
+    /// Timezone for analysis
+    #[arg(long, default_value = "UTC")]
+    pub timezone: String,
+
+    /// Currency for monetary values
+    #[arg(long, default_value = "USD")]
+    pub currency: String,
+
+    /// FX conversion rate (USD to target currency)
+    #[arg(long, default_value = "1.0")]
+    pub fx_rate: f64,
+
+    /// Attribution window in days
+    #[arg(long, default_value = "30")]
+    pub attribution_window: u32,
+
+    /// Scope (e.g. subscription:ACME)
+    #[arg(long)]
+    pub scope: Option<String>,
+
+    /// Analysis window (e.g. 24h, 7d)
+    #[arg(long)]
+    pub window: Option<String>,
+
+    /// Custom model YAML file path (defaults to embedded model.yaml)
+    #[arg(long)]
+    pub model: Option<String>,
+}
 
 #[derive(Parser)]
 #[command(name = "semstrait-demo")]
@@ -29,178 +69,202 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Orchestrate health + diff + proof-pack for an incident (verdict + actions + artifacts)
+    Incident {
+        /// Incident name (e.g. spend_drop)
+        name: String,
+
+        /// Metric to analyze
+        #[arg(long)]
+        metric: String,
+
+        /// Since date (YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+
+        #[command(flatten)]
+        common: CommonOptions,
+    },
     /// Run semantic query and show reproducibility proof
     Run {
-        /// Demo scenario to run
         #[arg(long, default_value = "union")]
         scenario: String,
 
-        /// Emit JSON plan instead of executing
         #[arg(long)]
         json: bool,
 
-        /// Skip execution, just show plan
         #[arg(long)]
         no_exec: bool,
 
-        /// As-of timestamp for reproducibility (ISO 8601 format)
-        #[arg(long, default_value = "2024-01-01T00:00:00Z")]
-        as_of: String,
-
-        /// Timezone for analysis
-        #[arg(long, default_value = "UTC")]
-        timezone: String,
-
-        /// Currency for monetary values
-        #[arg(long, default_value = "USD")]
-        currency: String,
-
-        /// FX conversion rate (USD to target currency)
-        #[arg(long, default_value = "1.0")]
-        fx_rate: f64,
-
-        /// Attribution window in days
-        #[arg(long, default_value = "30")]
-        attribution_window: u32,
+        #[command(flatten)]
+        common: CommonOptions,
     },
     /// Diagnose why numbers don't match: semantic vs platform comparison
     Diff {
-        /// As-of timestamp for reproducibility (ISO 8601 format)
-        #[arg(long, default_value = "2024-01-01T00:00:00Z")]
-        as_of: String,
+        /// Comma-separated metrics (e.g. total_cost,total_impressions)
+        #[arg(long)]
+        metrics: Option<String>,
 
-        /// Timezone for analysis
-        #[arg(long, default_value = "UTC")]
-        timezone: String,
+        /// Baseline type: raw, platform:facebook, platform:adwords
+        #[arg(long, default_value = "raw")]
+        baseline: String,
 
-        /// Currency for monetary values
-        #[arg(long, default_value = "USD")]
-        currency: String,
+        /// Grain for analysis: day, account, campaign, ad
+        #[arg(long, default_value = "day")]
+        grain: String,
 
-        /// FX conversion rate (USD to target currency)
-        #[arg(long, default_value = "1.0")]
-        fx_rate: f64,
+        /// Include explain/driver analysis
+        #[arg(long)]
+        explain: bool,
 
-        /// Attribution window in days
-        #[arg(long, default_value = "30")]
-        attribution_window: u32,
+        /// Scenario for fixture generation (e.g. messy_alignment)
+        #[arg(long)]
+        scenario: Option<String>,
+
+        #[command(flatten)]
+        common: CommonOptions,
     },
     /// Validate before live: impact analysis of proposed changes
     Impact {
-        /// Path to proposed model YAML file (optional - enables preview mode if omitted)
         #[arg(long)]
         proposed_model: Option<String>,
 
-        /// Enable preview mode with sampling (default: false)
         #[arg(long)]
         preview: bool,
 
-        /// As-of timestamp for reproducibility (ISO 8601 format)
-        #[arg(long, default_value = "2024-01-01T00:00:00Z")]
-        as_of: String,
+        /// Sample window (e.g. last_30_days)
+        #[arg(long)]
+        sample: Option<String>,
 
-        /// Timezone for analysis
-        #[arg(long, default_value = "UTC")]
-        timezone: String,
+        /// Comma-separated metrics
+        #[arg(long)]
+        metrics: Option<String>,
 
-        /// Currency for monetary values
-        #[arg(long, default_value = "USD")]
-        currency: String,
+        /// Scenario for fixture generation (e.g. messy_alignment)
+        #[arg(long)]
+        scenario: Option<String>,
 
-        /// FX conversion rate (USD to target currency)
-        #[arg(long, default_value = "1.0")]
-        fx_rate: f64,
-
-        /// Attribution window in days
-        #[arg(long, default_value = "30")]
-        attribution_window: u32,
+        #[command(flatten)]
+        common: CommonOptions,
     },
-    /// Monitor data health: freshness, anomalies, and backfill status
+    /// Monitor data health: safe-to-report, completeness, freshness
     Health {
-        /// As-of timestamp for reproducibility (ISO 8601 format)
-        #[arg(long, default_value = "2024-01-01T00:00:00Z")]
-        as_of: String,
-
-        /// Timezone for analysis
-        #[arg(long, default_value = "UTC")]
-        timezone: String,
-
-        /// Optional file to save alerts as JSON
         #[arg(long)]
         alert_output: Option<String>,
+
+        /// Scenario for fixture generation (e.g. messy_alignment)
+        #[arg(long)]
+        scenario: Option<String>,
+
+        #[command(flatten)]
+        common: CommonOptions,
     },
     /// Drilldown analysis: show contributing rows for a table group
     Drilldown {
-        /// Table group to drill down into
         table_group: String,
 
-        /// As-of timestamp for reproducibility (ISO 8601 format)
-        #[arg(long, default_value = "2024-01-01T00:00:00Z")]
-        as_of: String,
-
-        /// Timezone for analysis
-        #[arg(long, default_value = "UTC")]
-        timezone: String,
-
-        /// Currency for monetary values
-        #[arg(long, default_value = "USD")]
-        currency: String,
-
-        /// FX conversion rate (USD to target currency)
-        #[arg(long, default_value = "1.0")]
-        fx_rate: f64,
-
-        /// Attribution window in days
-        #[arg(long, default_value = "30")]
-        attribution_window: u32,
+        #[command(flatten)]
+        common: CommonOptions,
     },
-    /// Generate proof pack for a metric: reproducible evidence trail
+    /// Generate proof pack for a metric: definition, lineage, exportables
     ProofPack {
-        /// Metric name to generate proof pack for
         metric: String,
 
-        /// As-of timestamp for reproducibility (ISO 8601 format)
-        #[arg(long, default_value = "2024-01-01T00:00:00Z")]
-        as_of: String,
-
-        /// Timezone for analysis
-        #[arg(long, default_value = "UTC")]
-        timezone: String,
-
-        /// Currency for monetary values
-        #[arg(long, default_value = "USD")]
-        currency: String,
-
-        /// FX conversion rate (USD to target currency)
-        #[arg(long, default_value = "1.0")]
-        fx_rate: f64,
-
-        /// Attribution window in days
-        #[arg(long, default_value = "30")]
-        attribution_window: u32,
+        #[command(flatten)]
+        common: CommonOptions,
     },
-    /// Reconcile distinct counts: compare semantic vs baseline unique counts
+    /// Reconcile semantic vs baseline with timezone/attribution knobs
     Reconcile {
-        /// Metric name to reconcile (should use COUNT_DISTINCT)
         metric: String,
 
-        /// As-of timestamp for reproducibility (ISO 8601 format)
-        #[arg(long, default_value = "2024-01-01T00:00:00Z")]
-        as_of: String,
+        /// Baseline: raw, platform:facebook, platform:adwords
+        #[arg(long, default_value = "raw")]
+        baseline: String,
 
-        /// Timezone for analysis
-        #[arg(long, default_value = "UTC")]
-        timezone: String,
+        /// Attribution window (e.g. 1d_click,1d_view)
+        #[arg(long)]
+        attribution: Option<String>,
+
+        /// Scenario for fixture generation (e.g. messy_alignment)
+        #[arg(long)]
+        scenario: Option<String>,
+
+        #[command(flatten)]
+        common: CommonOptions,
+    },
+    /// Export data dictionary from semantic model
+    Dictionary {
+        #[command(subcommand)]
+        cmd: DictionaryCmd,
+    },
+    /// Manage lookup tables for semantic enrichment
+    Lookup {
+        #[command(subcommand)]
+        cmd: LookupCmd,
     },
 }
 
+#[derive(Subcommand)]
+enum DictionaryCmd {
+    /// Export dimensions, measures, metrics to CSV or JSON
+    Export {
+        #[arg(long, default_value = "csv", value_parser = ["csv", "json"])]
+        format: String,
+
+        #[arg(long)]
+        output: Option<String>,
+
+        #[arg(long)]
+        scope: Option<String>,
+
+        #[arg(long)]
+        model: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum LookupCmd {
+    /// Create lookup from CSV file
+    Create {
+        #[arg(long)]
+        name: String,
+
+        #[arg(long)]
+        key: String,
+
+        #[arg(long)]
+        value: String,
+
+        /// Source: file:<path>
+        #[arg(long)]
+        from: String,
+
+        #[arg(long)]
+        output_dir: Option<String>,
+    },
+    /// List saved lookups
+    List {},
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ReproducibilityParams {
-    as_of: String,
-    timezone: String,
-    currency: String,
-    fx_rate: f64,
-    attribution_window: u32,
+pub struct ReproducibilityParams {
+    pub as_of: String,
+    pub timezone: String,
+    pub currency: String,
+    pub fx_rate: f64,
+    pub attribution_window: u32,
+}
+
+impl From<&CommonOptions> for ReproducibilityParams {
+    fn from(opts: &CommonOptions) -> Self {
+        Self {
+            as_of: opts.as_of.clone(),
+            timezone: opts.timezone.clone(),
+            currency: opts.currency.clone(),
+            fx_rate: opts.fx_rate,
+            attribution_window: opts.attribution_window,
+        }
+    }
 }
 
 #[tokio::main]
@@ -208,61 +272,86 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Commands::Run { scenario, json, no_exec, as_of, timezone, currency, fx_rate, attribution_window } => {
-            handle_run(scenario, json, no_exec, as_of, timezone, currency, fx_rate, attribution_window).await
+        Commands::Incident { name, metric, since, common } => {
+            handle_incident(name, metric, since, common).await
         }
-        Commands::Diff { as_of, timezone, currency, fx_rate, attribution_window } => {
-            handle_diff(as_of, timezone, currency, fx_rate, attribution_window).await
+        Commands::Run { scenario, json, no_exec, common } => {
+            handle_run(scenario, json, no_exec, common).await
         }
-        Commands::Impact { proposed_model, preview, as_of, timezone, currency, fx_rate, attribution_window } => {
-            handle_impact(proposed_model, preview, as_of, timezone, currency, fx_rate, attribution_window).await
+        Commands::Diff { metrics, baseline, grain, explain, scenario, common } => {
+            handle_diff(metrics, baseline, grain, explain, scenario, common).await
         }
-        Commands::Health { as_of, timezone, alert_output } => {
-            handle_health(as_of, timezone, alert_output).await
+        Commands::Impact { proposed_model, preview, sample, metrics, scenario, common } => {
+            handle_impact(proposed_model, preview, sample, metrics, scenario, common).await
         }
-        Commands::Drilldown { table_group, as_of, timezone, currency, fx_rate, attribution_window } => {
-            handle_drilldown(table_group, as_of, timezone, currency, fx_rate, attribution_window).await
+        Commands::Health { scenario, alert_output, common } => {
+            handle_health(scenario, common, alert_output).await
         }
-        Commands::ProofPack { metric, as_of, timezone, currency, fx_rate, attribution_window } => {
-            handle_proof_pack(metric, as_of, timezone, currency, fx_rate, attribution_window).await
+        Commands::Drilldown { table_group, common } => {
+            handle_drilldown(table_group, common).await
         }
-        Commands::Reconcile { metric, as_of, timezone } => {
-            handle_reconcile(metric, as_of, timezone).await
+        Commands::ProofPack { metric, common } => {
+            handle_proof_pack(metric, common).await
         }
+        Commands::Reconcile { metric, baseline, attribution, scenario, common } => {
+            handle_reconcile(metric, baseline, attribution, scenario, common).await
+        }
+        Commands::Dictionary { cmd } => match cmd {
+            DictionaryCmd::Export { format, output, scope, model } => {
+                dictionary::handle_export(format, output, scope, model).await
+            }
+        },
+        Commands::Lookup { cmd } => match cmd {
+            LookupCmd::Create { name, key, value, from, output_dir } => {
+                lookup::handle_create(name, key, value, from, output_dir).await
+            }
+            LookupCmd::List {} => lookup::handle_list().await,
+        },
     }
 }
 
-/// Handle the 'run' subcommand - basic semantic query execution
+async fn handle_incident(
+    name: String,
+    metric: String,
+    since: Option<String>,
+    common: CommonOptions,
+) -> anyhow::Result<()> {
+    incident::run_incident(&name, &metric, since.as_deref(), &common, Some(&name)).await
+}
+
 async fn handle_run(
     scenario: String,
     json: bool,
     no_exec: bool,
-    as_of: String,
-    timezone: String,
-    currency: String,
-    fx_rate: f64,
-    attribution_window: u32,
+    common: CommonOptions,
 ) -> anyhow::Result<()> {
+    let repro = ReproducibilityParams::from(&common);
     println!("🔍 Semstrait Demo - Run Mode");
     println!("============================");
 
-    // Setup common infrastructure
     let (schema, model_name, request, plan_node, substrait_plan, repro_params, snapshot_id, temp_dir, table_paths) =
-        setup_common(as_of.clone(), timezone.clone(), currency.clone(), fx_rate, attribution_window).await?;
+        setup_common(
+            common.as_of.clone(),
+            common.timezone.clone(),
+            common.currency.clone(),
+            common.fx_rate,
+            common.attribution_window,
+            None,
+            None,
+            Some(scenario),
+            common.model.clone(),
+        ).await?;
     let model = schema.get_model(&model_name).unwrap();
 
-    // Print lineage report
     lineage::print_lineage_report(&schema, model, &request, &plan_node, &substrait_plan, &repro_params, &snapshot_id);
 
-    // Emit JSON if requested
     if json {
-        let json = serde_json::to_string_pretty(&substrait_plan)?;
+        let json_out = serde_json::to_string_pretty(&substrait_plan)?;
         println!("\n📄 Substrait Plan (JSON):");
-        println!("{}", json);
+        println!("{}", json_out);
         return Ok(());
     }
 
-    // Execute if not skipped
     if !no_exec {
         let table_paths = setup_table_paths(&temp_dir);
         let results = execute_common(&plan_node, &table_paths).await?;
@@ -274,49 +363,78 @@ async fn handle_run(
     Ok(())
 }
 
-/// Handle the 'diff' subcommand - discrepancy analysis
 async fn handle_diff(
-    as_of: String,
-    timezone: String,
-    currency: String,
-    fx_rate: f64,
-    attribution_window: u32,
+    metrics: Option<String>,
+    baseline: String,
+    grain: String,
+    explain: bool,
+    scenario: Option<String>,
+    common: CommonOptions,
 ) -> anyhow::Result<()> {
+    let metric_list = metrics
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+        .unwrap_or_else(|| vec!["total_cost".to_string(), "total_impressions".to_string()]);
+
     println!("🔍 Semstrait Demo - Diff Mode (Diagnose Why It Doesn't Match)");
     println!("============================================================");
 
-    // Setup common infrastructure
     let (schema, model_name, request, plan_node, substrait_plan, repro_params, snapshot_id, temp_dir, table_paths) =
-        setup_common(as_of.clone(), timezone.clone(), currency.clone(), fx_rate, attribution_window).await?;
+        setup_common(
+            common.as_of.clone(),
+            common.timezone.clone(),
+            common.currency.clone(),
+            common.fx_rate,
+            common.attribution_window,
+            None,
+            Some(metric_list.clone()),
+            scenario.clone(),
+            common.model.clone(),
+        ).await?;
     let model = schema.get_model(&model_name).unwrap();
 
-    // Execute semantic query
     let table_paths = setup_table_paths(&temp_dir);
     let semantic_results = execute_common(&plan_node, &table_paths).await?;
 
-    // Create DataFusion context for diff analysis
     let ctx = SessionContext::new();
-
-    // Run discrepancy analysis
     let diff_result = diff_engine::execute_diff_analysis(&ctx, &schema, model, &request, &semantic_results, &table_paths).await?;
 
-    // Print results
     diff_engine::print_diff_analysis(&diff_result)?;
 
-    println!("\n✅ Diff analysis completed!");
+    let snapshot_store = snapshot_store::SnapshotStore::new();
+    let snapshot_dir = snapshot_store.save_snapshot(
+        &snapshot_id,
+        &schema,
+        &request,
+        &plan_node,
+        &substrait_plan,
+        &repro_params,
+        &temp_dir,
+        &table_paths,
+    ).await?;
+
+    let report_md = diff_engine::format_diff_report(&diff_result);
+    artifacts::write_report_md(&snapshot_dir, &report_md)?;
+    artifacts::write_report_html(&snapshot_dir, &report_md)?;
+    let slack = diff_engine::format_slack_snippet(&diff_result);
+    artifacts::write_slack_txt(&snapshot_dir, &slack)?;
+    diff_engine::save_diff_json(&diff_result, &snapshot_dir)?;
+
+    println!("\n✅ Diff analysis completed! Artifacts: {}", snapshot_dir.display());
     Ok(())
 }
 
-/// Handle the 'impact' subcommand - change impact analysis
 async fn handle_impact(
     proposed_model: Option<String>,
     preview: bool,
-    as_of: String,
-    timezone: String,
-    currency: String,
-    fx_rate: f64,
-    attribution_window: u32,
+    _sample: Option<String>,
+    metrics: Option<String>,
+    scenario: Option<String>,
+    common: CommonOptions,
 ) -> anyhow::Result<()> {
+    let metric_list = metrics
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+        .unwrap_or_else(|| vec!["total_cost".to_string(), "total_impressions".to_string()]);
+
     if preview || proposed_model.is_none() {
         println!("🎯 Semstrait Demo - Impact Preview Mode (Sample Analysis)");
         println!("=======================================================");
@@ -325,53 +443,74 @@ async fn handle_impact(
         println!("=====================================================");
     }
 
-    // Setup common infrastructure
     let (schema, model_name, request, plan_node, substrait_plan, repro_params, snapshot_id, temp_dir, table_paths) =
-        setup_common(as_of.clone(), timezone.clone(), currency.clone(), fx_rate, attribution_window).await?;
+        setup_common(
+            common.as_of.clone(),
+            common.timezone.clone(),
+            common.currency.clone(),
+            common.fx_rate,
+            common.attribution_window,
+            None,
+            Some(metric_list),
+            scenario.clone(),
+            common.model.clone(),
+        ).await?;
     let model = schema.get_model(&model_name).unwrap();
 
-    // Determine if this is a preview or full impact analysis
     let proposed_model_path = if preview || proposed_model.is_none() {
-        None // Preview mode - no proposed model
+        None
     } else {
         proposed_model.as_deref()
     };
 
-    // Run impact analysis
     let ctx = SessionContext::new();
-    let impact_result = impact_engine::execute_impact_analysis(&ctx, &schema, model, proposed_model_path, &request, &setup_table_paths(&temp_dir)).await?;
+    let table_paths = setup_table_paths(&temp_dir);
+    let impact_result = impact_engine::execute_impact_analysis(
+        &ctx,
+        &schema,
+        model,
+        proposed_model_path,
+        &request,
+        &table_paths,
+    ).await?;
 
-    // Print results
     impact_engine::print_impact_analysis(&impact_result, preview || proposed_model.is_none())?;
 
-    println!("\n✅ Impact analysis completed!");
+    let snapshot_store = snapshot_store::SnapshotStore::new();
+    let repro = ReproducibilityParams::from(&common);
+    let plan_node = semstrait::planner::plan_semantic_query(&schema, model, &request)?;
+    let substrait_plan = semstrait::emitter::emit_plan(&plan_node, None)?;
+    let snapshot_id = execution::compute_snapshot_id(&schema, &request, &repro, &substrait_plan, &table_paths).await?;
+    let snapshot_dir = snapshot_store.save_snapshot(
+        &snapshot_id,
+        &schema,
+        &request,
+        &plan_node,
+        &substrait_plan,
+        &repro_params,
+        &temp_dir,
+        &table_paths,
+    ).await?;
+
+    let report_md = format!("# Impact Report\n\nMetric deltas:\n{:#?}", impact_result.metric_deltas);
+    artifacts::write_report_md(&snapshot_dir, &report_md)?;
+    artifacts::write_report_html(&snapshot_dir, &report_md)?;
+    artifacts::write_json(&snapshot_dir, "risk_summary.json", &impact_result)?;
+
+    println!("\n✅ Impact analysis completed! Artifacts: {}", snapshot_dir.display());
     Ok(())
 }
 
-/// Handle the 'health' subcommand - data health assessment
-async fn handle_health(
-    as_of: String,
-    timezone: String,
-    alert_output: Option<String>,
-) -> anyhow::Result<()> {
-    println!("🏥 Semstrait Demo - Health Mode (Data Trust Surface)");
-    println!("====================================================");
-
-    // Setup data sources
+async fn handle_health(scenario: Option<String>, common: CommonOptions, alert_output: Option<String>) -> anyhow::Result<()> {
     let temp_dir = TempDir::new()?;
-    let (adwords_path, facebook_path) = parquet_generation::generate_fixtures(&temp_dir)?;
+    let (_adwords_path, _facebook_path) = parquet_generation::generate_fixtures(&temp_dir, scenario.as_deref(), Some(&common.as_of))?;
     let table_paths = setup_table_paths(&temp_dir);
 
-    // Create DataFusion context
     let ctx = SessionContext::new();
+    let health_result = health::execute_health_assessment(&ctx, &table_paths, &common.as_of).await?;
 
-    // Run health assessment
-    let health_result = health::execute_health_assessment(&ctx, &table_paths, &as_of).await?;
-
-    // Print results
     health::print_health_assessment(&health_result)?;
 
-    // Save alerts to file if requested
     if let Some(output_path) = alert_output {
         if !health_result.alerts.is_empty() {
             let alert_json = health::export_alerts_json(&health_result.alerts)?;
@@ -386,47 +525,38 @@ async fn handle_health(
     Ok(())
 }
 
-/// Handle the 'drilldown' subcommand - row-level analysis
-async fn handle_drilldown(
-    table_group: String,
-    as_of: String,
-    timezone: String,
-    currency: String,
-    fx_rate: f64,
-    attribution_window: u32,
-) -> anyhow::Result<()> {
+async fn handle_drilldown(table_group: String, common: CommonOptions) -> anyhow::Result<()> {
     println!("🔬 Semstrait Demo - Drilldown Mode: {}", table_group);
     println!("==========================================");
 
-    // Setup data sources
     let temp_dir = TempDir::new()?;
-    let (adwords_path, facebook_path) = parquet_generation::generate_fixtures(&temp_dir)?;
+    let (adwords_path, facebook_path) = parquet_generation::generate_fixtures(&temp_dir, None, None)?;
 
-    // Print drilldown analysis
     execution::print_drilldown(&table_group, &adwords_path, &facebook_path)?;
 
     println!("\n✅ Drilldown analysis completed!");
     Ok(())
 }
 
-/// Handle the 'proof-pack' subcommand - generate reproducible evidence trail
-async fn handle_proof_pack(
-    metric: String,
-    as_of: String,
-    timezone: String,
-    currency: String,
-    fx_rate: f64,
-    attribution_window: u32,
-) -> anyhow::Result<()> {
+async fn handle_proof_pack(metric: String, common: CommonOptions) -> anyhow::Result<()> {
+    let repro = ReproducibilityParams::from(&common);
     println!("📋 Semstrait Demo - Proof Pack Mode: {}", metric);
     println!("======================================");
 
-    // Setup common infrastructure
     let (schema, model_name, request, plan_node, substrait_plan, repro_params, snapshot_id, temp_dir, table_paths) =
-        setup_common(as_of.clone(), timezone.clone(), currency.clone(), fx_rate, attribution_window).await?;
+        setup_common(
+            common.as_of.clone(),
+            common.timezone.clone(),
+            common.currency.clone(),
+            common.fx_rate,
+            common.attribution_window,
+            None,
+            Some(vec![metric.clone()]),
+            None,
+            common.model.clone(),
+        ).await?;
     let model = schema.get_model(&model_name).unwrap();
 
-    // Generate proof pack
     let proof_pack = proof_pack::generate_proof_pack(
         &schema,
         model,
@@ -437,10 +567,8 @@ async fn handle_proof_pack(
         &request,
     ).await?;
 
-    // Print proof pack
     proof_pack::print_proof_pack(&proof_pack)?;
 
-    // Save complete snapshot
     let snapshot_store = snapshot_store::SnapshotStore::new();
     let snapshot_dir = snapshot_store.save_snapshot(
         &snapshot_id,
@@ -453,40 +581,38 @@ async fn handle_proof_pack(
         &table_paths,
     ).await?;
 
-    // Save proof pack within the snapshot
     proof_pack::save_proof_pack_to_snapshot(&proof_pack, &snapshot_dir)?;
 
     println!("💾 Complete snapshot saved to: {}", snapshot_dir.display());
-    println!("🔗 Shareable link: file://{}", snapshot_dir.canonicalize()?.display());
+    if let Ok(canonical) = snapshot_dir.canonicalize() {
+        println!("🔗 Shareable link: file://{}", canonical.display());
+    }
 
     println!("\n✅ Proof pack and snapshot generated!");
     Ok(())
 }
 
-/// Handle the 'reconcile' subcommand - compare distinct counts
 async fn handle_reconcile(
     metric: String,
-    as_of: String,
-    timezone: String,
+    baseline: String,
+    _attribution: Option<String>,
+    scenario: Option<String>,
+    common: CommonOptions,
 ) -> anyhow::Result<()> {
     println!("🔍 Semstrait Demo - Reconcile Mode: {}", metric);
     println!("=====================================");
 
-    // Setup data sources
     let temp_dir = TempDir::new()?;
-    let (adwords_path, facebook_path) = parquet_generation::generate_fixtures(&temp_dir)?;
+    let (adwords_path, facebook_path) = parquet_generation::generate_fixtures(&temp_dir, scenario.as_deref(), Some(&common.as_of))?;
     let table_paths = setup_table_paths(&temp_dir);
 
-    // Load schema
-    let mut schema = load_and_override_schema(&adwords_path, &facebook_path)?;
+    let mut schema = load_and_override_schema(&adwords_path, &facebook_path, None)?;
     let model_name = "marketing-demo".to_string();
     let model = schema.get_model(&model_name)
         .ok_or_else(|| anyhow::anyhow!("Model not found"))?;
 
-    // Create DataFusion context
     let ctx = SessionContext::new();
 
-    // Execute reconciliation
     let reconciliation = reconcile::execute_reconciliation(
         &ctx,
         &schema,
@@ -495,33 +621,48 @@ async fn handle_reconcile(
         &table_paths,
     ).await?;
 
-    // Print results
-    reconcile::print_reconciliation(&reconciliation)?;
+    let baseline_label = if baseline.is_empty() || baseline == "raw" {
+        "platform:facebook".to_string()
+    } else {
+        baseline.clone()
+    };
+    reconcile::print_reconciliation(&reconciliation, &baseline_label, scenario.as_deref())?;
 
+    let snapshot_id = format!(
+        "reconcile_{}_{}",
+        metric.replace(|c: char| !c.is_alphanumeric(), "_"),
+        chrono::Utc::now().format("%Y%m%d_%H%M%S")
+    );
+    let snapshot_dir = std::path::Path::new(".semstrait_demo").join("snapshots").join(&snapshot_id);
+    reconcile::save_reconcile_artifacts(&snapshot_dir, &reconciliation, &baseline_label, &common.timezone, scenario.as_deref())?;
+
+    println!("\n💾 Saved to: {}", snapshot_dir.display());
+    if let Ok(canonical) = snapshot_dir.canonicalize() {
+        println!("🔗 Shareable link: file://{}", canonical.display());
+    }
     println!("\n✅ Reconciliation completed!");
     Ok(())
 }
 
-/// Common setup for all commands that need schema/model/plan
 async fn setup_common(
     as_of: String,
     timezone: String,
     currency: String,
     fx_rate: f64,
     attribution_window: u32,
+    rows: Option<Vec<String>>,
+    metrics: Option<Vec<String>>,
+    scenario: Option<String>,
+    model_path: Option<String>,
 ) -> anyhow::Result<(semstrait::Schema, String, semstrait::QueryRequest, semstrait::plan::PlanNode, substrait::proto::Plan, ReproducibilityParams, String, TempDir, HashMap<String, String>)> {
-    // Create temp directory for Parquet files
     let temp_dir = TempDir::new()?;
     println!("📁 Using temp directory: {}", temp_dir.path().display());
 
-    // Generate Parquet fixtures
     println!("\n📊 Generating Parquet fixtures...");
-    let (adwords_path, facebook_path) = parquet_generation::generate_fixtures(&temp_dir)?;
+    let (adwords_path, facebook_path) = parquet_generation::generate_fixtures(&temp_dir, scenario.as_deref(), Some(&as_of))?;
 
-    // Load embedded semantic model and override paths
-    let mut schema = load_and_override_schema(&adwords_path, &facebook_path)?;
+    let mut schema = load_and_override_schema(&adwords_path, &facebook_path, model_path.as_deref())?;
 
-    // Build reproducibility parameters
     let repro_params = ReproducibilityParams {
         as_of: as_of.to_string(),
         timezone: timezone.to_string(),
@@ -530,11 +671,10 @@ async fn setup_common(
         attribution_window,
     };
 
-    // Build query request
     let request = semstrait::QueryRequest {
         model: "marketing-demo".to_string(),
-        rows: None, // No grouping for aggregate-only query
-        metrics: Some(vec!["total_cost".to_string(), "total_impressions".to_string()]),
+        rows,
+        metrics,
         ..Default::default()
     };
 
@@ -549,60 +689,51 @@ async fn setup_common(
         println!("  Metrics: {:?}", metrics);
     }
 
-    // Get semantic model name first
     let model_name = request.model.clone();
 
-    // Get semantic model reference and plan the query in a scoped block
     let plan_node = {
         let model = schema.get_model(&model_name)
             .ok_or_else(|| anyhow::anyhow!("Model not found"))?;
-
-        // Plan the query
         println!("\n🏗️  Planning semantic query...");
         semstrait::planner::plan_semantic_query(&schema, model, &request)?
     };
 
-    // Setup table paths
     let table_paths = setup_table_paths(&temp_dir);
 
-    // Emit Substrait plan
     println!("📤 Emitting Substrait plan...");
     let substrait_plan = semstrait::emitter::emit_plan(&plan_node, None)?;
 
-    // Compute snapshot ID for reproducibility
     let snapshot_id = execution::compute_snapshot_id(&schema, &request, &repro_params, &substrait_plan, &table_paths).await?;
 
     Ok((schema, model_name, request, plan_node, substrait_plan, repro_params, snapshot_id, temp_dir, table_paths))
 }
 
-/// Common execution logic
 async fn execute_common(plan_node: &semstrait::plan::PlanNode, table_paths: &HashMap<String, String>) -> anyhow::Result<Vec<datafusion::arrow::record_batch::RecordBatch>> {
     println!("\n⚡ Executing Substrait Plan...");
-
-    // Execute via the execution module
-    execution::execute_substrait_plan_via_df_exec(&datafusion::prelude::SessionContext::new(), plan_node, table_paths).await
+    execution::execute_substrait_plan_via_df_exec(&SessionContext::new(), plan_node, table_paths).await
 }
 
-/// Set up table paths from temp directory
-fn setup_table_paths(temp_dir: &TempDir) -> HashMap<String, String> {
+pub fn setup_table_paths(temp_dir: &TempDir) -> HashMap<String, String> {
     let mut table_paths = HashMap::new();
     table_paths.insert(
         "adwords_campaigns".to_string(),
-        temp_dir.path().join("adwords_campaigns.parquet").to_string_lossy().to_string()
+        temp_dir.path().join("adwords_campaigns.parquet").to_string_lossy().to_string(),
     );
     table_paths.insert(
         "facebook_campaigns".to_string(),
-        temp_dir.path().join("facebook_campaigns.parquet").to_string_lossy().to_string()
+        temp_dir.path().join("facebook_campaigns.parquet").to_string_lossy().to_string(),
     );
     table_paths
 }
 
-/// Load the embedded schema and override parquet paths to point to generated fixtures
-fn load_and_override_schema(adwords_path: &str, facebook_path: &str) -> anyhow::Result<semstrait::Schema> {
-    let schema_yaml = include_str!("../model.yaml");
-    let mut schema = semstrait::parser::parse_str(schema_yaml)?;
+pub fn load_and_override_schema(adwords_path: &str, facebook_path: &str, model_path: Option<&str>) -> anyhow::Result<semstrait::Schema> {
+    let schema_yaml = if let Some(model_path) = model_path {
+        std::fs::read_to_string(model_path)?
+    } else {
+        include_str!("../model.yaml").to_string()
+    };
+    let mut schema = semstrait::parser::parse_str(&schema_yaml)?;
 
-    // Override the parquet paths in the schema
     for model in &mut schema.semantic_models {
         for table_group in &mut model.dataset_groups {
             for table in &mut table_group.datasets {
@@ -612,7 +743,6 @@ fn load_and_override_schema(adwords_path: &str, facebook_path: &str) -> anyhow::
                     _ => continue,
                 };
 
-                // Update the source path
                 if let semstrait::semantic_model::Source::Parquet { path } = &mut table.source {
                     *path = new_path.to_string();
                 }

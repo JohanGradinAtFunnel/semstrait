@@ -4,7 +4,7 @@
 
 Traditional semantic layers tell you **how** numbers are calculated. Semstrait's trust layer tells you **why** they changed, **whether** changes are safe, and **whether** numbers match reality.
 
-This demo showcases the complete trust substrate: three engines that transform semantic layers from "calculation compilers" into "trust platforms".
+This demo showcases the complete trust substrate: five engines that transform semantic layers from "calculation compilers" into "trust platforms", plus an **incident orchestrator** that ties them together.
 
 ## 🎯 The Problem: Data Fear in Analytics
 
@@ -17,58 +17,66 @@ Semantic layers promised trust, but delivered only lineage. Teams still can't an
 
 ## 🚀 The Solution: Trust Engines
 
-Semstrait implements **five substrate engines** that solve data fear:
+Semstrait implements **five substrate engines** plus an **incident orchestrator** that solve data fear:
+
+### 0. 🧠 Incident Orchestrator (`incident`)
+**"What happened and what should I do?"**
+
+Orchestrates health → diff → proof-pack to produce a verdict, confidence, and recommended actions:
+- **Verdict-first**: Data gap vs mapping mismatch vs real performance change
+- **Confidence score**: Heuristic 0–1 based on signal consistency
+- **Recommended actions**: Backfill windows, stakeholder notifications, alert policies
+- **Shareable artifacts**: `report.md`, `report.html`, `slack.txt`, JSON in snapshot dir
 
 ### 1. 📋 Prove Engine (`proof-pack`)
 **"What evidence backs this number?"**
 
 Generates reproducible proof packs with complete audit trails:
-- **Evidence generation**: Metric formulas, measure mappings, source metadata
-- **Snapshot IDs**: BLAKE3 cryptographic hashes for deterministic reproducibility
-- **Shareable artifacts**: JSON exports with file:// links for collaboration
-- **Cross-platform traceability**: FX rates, timezones, attribution windows
+- **Value + meaning**: Executed metric value and human-readable definition
+- **Definition (Human/Exact)**: SQL-ish CASE for cross-datasetGroup metrics
+- **Lineage table**: datasetGroup → measure mappings
+- **Shareable artifacts**: `report.md`, `report.html`, `sql.sql`, `proof_pack.json`
 
 ### 2. 🔍 Diagnose Engine (`diff`)
 **"Why did this number change?"**
 
 Compares semantic results against platform baselines with grain-aware drilldown:
-- **Metric variance analysis**: Absolute and percentage differences
-- **Grain-aware root cause**: Auto-detects where divergence begins (day → account → campaign → ad)
-- **Value state classification**: Distinguishes actual values, zeros, nulls, missing sources
-- **Aggregation mismatch detection**: Flags non-additive metrics and calculation errors
+- **Verdict + first divergence**: Where and why numbers diverge
+- **Provenance breakdown**: By datasetGroup at divergence point
+- **Explain/driver analysis**: Missing ingestion vs mapping mismatch
+- **Shareable artifacts**: `report.md`, `report.html`, `slack.txt`, `diff_result.json`
 
 ### 3. ⚖️ Reconcile Engine (`reconcile`)
 **"Do the numbers add up?"**
 
-Validates distinct counts and cross-platform consistency:
-- **Semantic vs baseline comparison**: Exact distinct count validation
-- **Cross-table reconciliation**: Multi-source deduplication verification
-- **Data quality assurance**: Detects missing data, duplicates, calculation errors
-- **Audit compliance**: Mathematical validation of user attribution and counts
+Validates semantic vs baseline with protocol output and knobs:
+- **Verdict**: Equal vs close-but-not-equal
+- **Ranked likely reasons**: Timezone, attribution, platform completeness
+- **Evidence + next steps**: Try `--timezone`, `--as-of` to align
+- **Shareable artifacts**: `report.md`, `report.html`, `slack.txt`, `reconcile.json`
 
 ### 4. 🎯 Validate Engine (`impact`)
 **"Is this change safe to deploy?"**
 
 Dual-executes current vs proposed models to predict deployment impact:
-- **Row/metric/null deltas**: Quantifies change magnitude across all dimensions
-- **Edge case scanning**: Detects NULL rate explosions, duplicate key inflation, CASE ELSE gaps
-- **Dependency graph analysis**: Shows which dashboards/reports will break
-- **Risk assessment**: MAJOR/MINOR change classification with safety recommendations
+- **Verdict**: MAJOR/MINOR/BLOCK with risk checks
+- **What changed**: Metric mappings by datasetGroup
+- **Risk checks**: CASE coverage, non-additive metrics, null rate changes
+- **Shareable artifacts**: `report.md`, `report.html`, `risk_summary.json`
 
 ### 5. 🏥 Monitor Engine (`health`)
 **"Is the data even trustworthy?"**
 
-Continuous health assessment of the data substrate:
-- **Freshness watermarking**: Tracks ingestion completeness and data age
-- **Silent failure detection**: Zero rows, volume drops, value collapses
-- **Backfill state tracking**: Running/partial/complete/stale status
-- **Data fingerprinting**: Cryptographic verification of data integrity
-- **Alert generation**: Configurable thresholds with JSON export
+Continuous health assessment with verdict-first output:
+- **Safe to report**: Yes/no + critical issue count
+- **Top alerts**: Ranked by severity
+- **Completeness + freshness**: Watermarks, lag, expected SLA
+- **Provenance**: Snapshot ID + data fingerprint
 
 ## 📊 The Transformation
 
 | Traditional Semantic Layer | Semstrait Trust Layer |
-|---------------------------|----------------------|
+|---------------------------|------------------------|
 | "How is this calculated?" | "Here's the complete proof pack" |
 | "Why did it change?" | "Root cause: Missing Facebook data" |
 | "Do these numbers add up?" | "✅ Semantic matches baseline exactly" |
@@ -78,42 +86,130 @@ Continuous health assessment of the data substrate:
 
 **Result**: Marketing teams stop being afraid of their data. They start trusting their numbers enough to make bold decisions.
 
+## 🏗️ Architecture: Metadata & Contracts
+
+The demo implements two key architectural patterns:
+
+### Metadata/Inventory System
+
+The `metadata.rs` module provides runtime dataset inventory computation:
+
+- **DatasetInventory**: Row counts, schema hashes, watermarks, completeness scores
+- **InventorySnapshot**: Complete state across all datasets with overall fingerprint
+- **InventoryBuilder**: DataFusion-based computation avoiding duplicate work
+
+Used by `snapshot_store.rs` (persists `inventory.json`) and `health.rs` (consumes inventory for quality assessment).
+
+### Semantic Contracts
+
+The demo showcases **semantic correctness as a contract** with strict enforcement:
+
+- **Identity Scoping**: Campaign/ad IDs scoped by account (`scopedBy: ["accounts.id"]`)
+- **Join Relationships**: Explicit cardinality prevents double counting (`relationship: many_to_one`)
+- **Dataset Grain**: Declared uniqueness constraints validate aggregations (`grain: [...]`)
+- **Aggregation Rules**: Blocks unsafe cross-datasetGroup rollups (`count_distinct`)
+
+#### Contract Violation Testing
+
+The demo includes `contract_violation_test.yaml` - a model that demonstrates contract enforcement:
+
+**Test Contract Violations:**
+```bash
+# Run the full test suite including contract violation tests
+bash tools/semstrait_demo/test_all_scenarios.sh
+
+# Test specific contract violations
+cargo run --manifest-path tools/semstrait_demo/Cargo.toml --quiet run --scenario union --model tools/semstrait_demo/contract_violation_test.yaml
+# This should show contract violations if you modify the query to trigger them
+```
+
+**Contract Violation Example**: The `total_unique_users` metric uses `count_distinct` across datasetGroups, which would be blocked in strict mode as an unsafe holistic aggregation.
+
+```yaml
+# Contract configuration (model.yaml)
+contract:
+  mode: strict  # Blocks violations instead of warning
+
+# Identity scoping example
+dimensions:
+  - name: campaigns
+    attributes:
+      - name: id
+        scopedBy: ["accounts.id"]  # Campaign IDs only unique within accounts
+```
+
 ## 🚀 Quick Start: Trust Workflow
 
 Install Rust, then from the repository root:
 
 ```bash
-# 1. See current data health ✅ WORKING
+# 🧪 Run all demo scenarios (comprehensive test suite)
+bash tools/semstrait_demo/test_all_scenarios.sh
+
+# 1. Incident triage (orchestrates health + diff + proof-pack) ⭐ PRIMARY
+cargo run --manifest-path tools/semstrait_demo/Cargo.toml incident spend_drop --metric total_cost --since 2026-02-15
+
+# 2. See current data health
 cargo run --manifest-path tools/semstrait_demo/Cargo.toml health
 
-# 2. Generate proof pack for any metric ✅ WORKING
+# 3. Generate proof pack for any metric
 cargo run --manifest-path tools/semstrait_demo/Cargo.toml proof-pack total_cost
 
-# 3. Reconcile distinct counts ✅ WORKING
+# 4. Reconcile distinct counts
 cargo run --manifest-path tools/semstrait_demo/Cargo.toml reconcile total_unique_users
 
-# 4. Diagnose discrepancies ✅ WORKING
-cargo run --manifest-path tools/semstrait_demo/Cargo.toml diff
+# 5. Diagnose discrepancies
+cargo run --manifest-path tools/semstrait_demo/Cargo.toml diff --metrics total_cost,total_impressions --explain
 
-# 5. Drill down to contributing rows ✅ WORKING
+# 6. Drill down to contributing rows
 cargo run --manifest-path tools/semstrait_demo/Cargo.toml drilldown adwords
 
-# 6. Validate model changes 🎯 FULLY SUPPORTED
-# Preview mode (simulates changes, no proposed model needed)
+# 7. Validate model changes
 cargo run --manifest-path tools/semstrait_demo/Cargo.toml impact --preview
-
-# Full impact analysis (compare against proposed changes)
 cargo run --manifest-path tools/semstrait_demo/Cargo.toml impact --proposed-model tools/semstrait_demo/proposed_changes.yaml
 
-# Example with new metric addition
-cargo run --manifest-path tools/semstrait_demo/Cargo.toml impact --proposed-model tools/semstrait_demo/new_metric_example.yaml
+# 8. Export data dictionary
+cargo run --manifest-path tools/semstrait_demo/Cargo.toml dictionary export --format csv
+cargo run --manifest-path tools/semstrait_demo/Cargo.toml dictionary export --format json --output data_dictionary.json
 
-# 📁 Example files included:
-# - `tools/semstrait_demo/proposed_changes.yaml` - Changes Facebook spend aggregation from SUM to AVG
-# - `tools/semstrait_demo/new_metric_example.yaml` - Adds a new "cost_per_impression" metric
+# 9. Manage lookups
+cargo run --manifest-path tools/semstrait_demo/Cargo.toml lookup create --name campaign_map --key campaign_id --value campaign_name --from file:tools/semstrait_demo/campaigns.csv
+cargo run --manifest-path tools/semstrait_demo/Cargo.toml lookup list
+
+# 10. Test contract violations (demonstrates enforcement)
+bash tools/semstrait_demo/test_all_scenarios.sh  # Includes contract violation tests
+cargo run --manifest-path tools/semstrait_demo/Cargo.toml --quiet run --scenario union --model tools/semstrait_demo/contract_violation_test.yaml  # Test with violation model
 ```
 
 ## 📋 Trust Engine Reference
+
+### Common Options (shared across commands)
+```bash
+--as-of <TIMESTAMP>       Point-in-time analysis (ISO 8601, e.g. 2026-02-15T23:59:00Z)
+--timezone <TZ>           Analysis timezone (default: UTC)
+--currency <CURR>          Target currency for monetary values
+--fx-rate <RATE>           Foreign exchange rate
+--attribution-window <N>   Attribution window in days
+--scope <SCOPE>            Scope filter (e.g. subscription:ACME)
+--window <WINDOW>         Analysis window (e.g. 24h, 7d)
+```
+
+### `incident` - Trust Incident Orchestration
+Orchestrates health → diff → proof-pack and produces verdict, confidence, and recommended actions.
+
+```bash
+cargo run --manifest-path tools/semstrait_demo/Cargo.toml incident <NAME> --metric <METRIC> [--since <YYYY-MM-DD>]
+
+Example:
+  incident spend_drop --metric total_cost --since 2026-02-15
+
+Output:
+  - Verdict (data gap / mapping mismatch / real change)
+  - Confidence score (0–1)
+  - Impact %
+  - Recommended actions
+  - Shareable artifacts in .semstrait_demo/snapshots/<id>/
+```
 
 ### `run` - Reproducible Semantic Execution
 Generates deterministic results with snapshot IDs for audit trails.
@@ -124,410 +220,231 @@ cargo run --manifest-path tools/semstrait_demo/Cargo.toml run [OPTIONS]
 Options:
   --no-exec              Show plan without executing
   --json                 Output Substrait plan as JSON
-  --as-of <TIMESTAMP>    Point-in-time analysis (ISO 8601)
-  --timezone <TZ>        Analysis timezone
-  --currency <CURR>      Target currency for monetary values
-  --fx-rate <RATE>       Foreign exchange rate
-  --attribution-window <DAYS> Attribution window in days
+  --scenario <NAME>       Fixture scenario (default: union)
 ```
 
 ### `diff` - Discrepancy Diagnosis
-Semantic vs platform comparison with root cause analysis.
+Semantic vs platform comparison with verdict, first divergence, and provenance breakdown.
 
 ```bash
 cargo run --manifest-path tools/semstrait_demo/Cargo.toml diff [OPTIONS]
 
-# Inherits same reproducibility options as `run`
+Options:
+  --metrics <LIST>       Comma-separated metrics (e.g. total_cost,total_impressions)
+  --baseline <TYPE>      raw, platform:facebook, platform:adwords (default: raw)
+  --grain <GRAIN>        day, account, campaign, ad (default: day)
+  --explain              Include driver/root-cause analysis
+  --scenario <NAME>      Fixture scenario (e.g. messy_alignment)
 ```
 
 ### `impact` - Change Impact Validation
 Predicts deployment impact before making changes live.
 
 ```bash
-# Preview mode (simulates changes for demonstration)
-cargo run --manifest-path tools/semstrait_demo/Cargo.toml impact --preview [OPTIONS]
-
-# Full impact analysis (compares against actual proposed changes)
-cargo run --manifest-path tools/semstrait_demo/Cargo.toml impact --proposed-model <PATH> [OPTIONS]
+cargo run --manifest-path tools/semstrait_demo/Cargo.toml impact [OPTIONS]
 
 Options:
-  --preview                    Enable preview mode with simulated changes
-  --proposed-model <PATH>      Path to proposed model YAML file
-
-# Inherits reproducibility options from `run`
+  --preview                    Simulate changes (no proposed model needed)
+  --proposed-model <PATH>      Path to proposed model YAML
+  --sample <WINDOW>            Sample window (e.g. last_30_days)
+  --metrics <LIST>             Comma-separated metrics
+  --scenario <NAME>            Fixture scenario (e.g. messy_alignment)
 ```
 
 ### `health` - Data Health Monitoring
-Continuous assessment of data pipeline health.
+Verdict-first assessment: safe-to-report, top alerts, completeness, freshness.
 
 ```bash
 cargo run --manifest-path tools/semstrait_demo/Cargo.toml health [OPTIONS]
 
 Options:
-  --as-of <TIMESTAMP>    Analysis timestamp
-  --timezone <TZ>        Display timezone
+  --alert-output <PATH>  Write alerts JSON to file
+  --scenario <NAME>      Fixture scenario (e.g. messy_alignment)
 ```
 
 ### `proof-pack` - Evidence Generation
-Creates reproducible proof packs with full audit trails for any metric.
+Creates reproducible proof packs with value, meaning, definitions, lineage, and exportables.
 
 ```bash
 cargo run --manifest-path tools/semstrait_demo/Cargo.toml proof-pack <METRIC_NAME> [OPTIONS]
 
-Options:
-  --as-of <TIMESTAMP>    Point-in-time analysis (ISO 8601)
-  --timezone <TZ>        Analysis timezone
-  --currency <CURR>      Target currency for monetary values
-  --fx-rate <RATE>       Foreign exchange rate
-  --attribution-window <DAYS> Attribution window in days
-
 Output:
-  - Snapshot ID for reproducibility
-  - Metric formula and measure mappings
-  - Source metadata (row counts, schemas, last ingested)
-  - Shareable file:// link to saved artifacts
+  - VALUE: executed metric result
+  - WHAT THIS METRIC MEANS
+  - DEFINITION (Human) and DEFINITION (Exact)
+  - LINEAGE table (datasetGroup → measure)
+  - EXPORTABLES: report.md, report.html, sql.sql in snapshot dir
 ```
 
 ### `reconcile` - Distinct Count Validation
-Compares semantic distinct counts against baseline calculations for data quality assurance.
+Protocol output with baseline/timezone knobs and ranked likely reasons.
 
 ```bash
 cargo run --manifest-path tools/semstrait_demo/Cargo.toml reconcile <METRIC_NAME> [OPTIONS]
 
 Options:
-  --as-of <TIMESTAMP>    Analysis timestamp
-  --timezone <TZ>        Display timezone
+  --baseline <TYPE>      raw, platform:facebook, platform:adwords (default: raw)
+  --attribution <SPEC>    Attribution window (e.g. 1d_click,1d_view)
+  --scenario <NAME>      Fixture scenario (e.g. messy_alignment)
 
 Output:
-  - Semantic vs baseline distinct count comparison
-  - Match validation with detailed notes
-  - Cross-platform deduplication verification
+  - VERDICT: Equal / Close but not equal
+  - SEMANTIC vs BASELINE with delta %
+  - MOST LIKELY REASONS (ranked)
+  - EVIDENCE + NEXT steps
+  - Artifacts: report.md, report.html, slack.txt, reconcile.json
 ```
 
 ### `drilldown` - Row-Level Analysis
-Shows exact contributing rows for any metric/table group.
+Shows exact contributing rows for any table group.
 
 ```bash
 cargo run --manifest-path tools/semstrait_demo/Cargo.toml drilldown <TABLE_GROUP> [OPTIONS]
-
-# Inherits reproducibility options from `run`
 ```
 
-## 🎬 Trust in Action: Marketing Analytics Scenario
-
-**Scenario**: You're a marketing analyst noticing that total campaign spend dropped 23% this month. Is this real? A calculation error? Data pipeline issue?
-
-### Phase 1: Establish Data Health 🏥
-
-First, check if the data is even trustworthy:
+### `dictionary export` - Data Dictionary
+Exports dimensions, measures, and metrics from the semantic model.
 
 ```bash
-$ cargo run --manifest-path tools/semstrait_demo/Cargo.toml health
+cargo run --manifest-path tools/semstrait_demo/Cargo.toml dictionary export [OPTIONS]
+
+Options:
+  --format <FMT>         csv or json (default: csv)
+  --output <PATH>        Output file (default: ./data_dictionary.csv or .json)
+  --model <PATH>         Model YAML path (default: embedded model)
+  --scope <SCOPE>        Scope filter
 ```
 
-```
-🏥 DATA HEALTH ASSESSMENT
-========================
-🏆 Overall Health: 🟢 GOOD
-🔐 Data Fingerprint: a1b2c3d4e5f67890
-
-📊 Table Health:
-+------------------+------------+----------------+----------------+
-| Table            | Rows       | Schema OK     | Quality Score  |
-+------------------+------------+----------------+----------------+
-| adwords_campaigns| 3          | ✅             | 100.0          |
-| facebook_campaigns| 2         | ✅             | 100.0          |
-+------------------+------------+----------------+----------------+
-
-⏰ Freshness Watermarks:
-  🟢 adwords_campaigns:
-    Last ingested: 2024-01-01 12:00:00 UTC
-    Max event time: 2024-01-01 00:00:12 UTC
-    Complete up to: 2024-01-01 00:00:00 UTC
-
-✅ No health alerts detected
-```
-
-**✅ Data is fresh and healthy. The drop is real.**
-
-### Phase 1.5: Generate Proof Pack 📋
-
-Create a complete audit trail for the spend metric:
+### `lookup create` / `lookup list` - Lookup Management
+Create lookups from CSV (deduped by key) or list saved lookups.
 
 ```bash
-$ cargo run --manifest-path tools/semstrait_demo/Cargo.toml proof-pack total_cost
+# Create from CSV (sample file included)
+cargo run --manifest-path tools/semstrait_demo/Cargo.toml lookup create \
+  --name campaign_map --key campaign_id --value campaign_name --from file:tools/semstrait_demo/campaigns.csv
+
+# List saved lookups
+cargo run --manifest-path tools/semstrait_demo/Cargo.toml lookup list
 ```
 
-```
-📋 PROOF PACK
-============
-Metric: total_cost
-Snapshot ID: 90dc7d2038baeeac9d877654bbc9db27bd07e62469d980fe1d1dd4ca5c6701ee
-As-of: 2024-01-01T00:00:00Z
-Timezone: UTC
-Currency: USD (FX: 1.0000)
-Attribution Window: 30 days
+Lookups are stored under `.semstrait_demo/lookups/<name>/` with `lookup.json` and `meta.json`.
 
-📐 METRIC FORMULA
-  Expression: CASE WHEN tableGroup = "adwords" THEN cost ELSE spend END
-  Additive: false
+## 🎬 Trust in Action: Incident Triage
 
-🔗 MEASURE MAPPINGS
-  AdWords: cost → cost (sum)
-  Facebook: spend → spend (sum)
-
-📊 SOURCE METADATA
-  adwords_campaigns: 3 rows, last ingested 2024-01-01 12:00:00 UTC
-  facebook_campaigns: 2 rows, last ingested 2024-01-01 12:00:00 UTC
-
-💾 Saved to: .semstrait_demo/snapshots/90dc7d2038baeeac9d877654bbc9db27bd07e62469d980fe1d1dd4ca5c6701ee
-🔗 Shareable link: file:///.semstrait_demo/snapshots/[snapshot-id]/
-```
-
-**✅ Proof pack generated with full audit trail and reproducible snapshot.**
-
-### Phase 1.75: Validate Data Quality 🔍
-
-Check if distinct counts match expectations (critical for user attribution):
+**Scenario**: Spend dropped. Is it real performance or a data gap?
 
 ```bash
-$ cargo run --manifest-path tools/semstrait_demo/Cargo.toml reconcile total_unique_users
+$ cargo run --manifest-path tools/semstrait_demo/Cargo.toml incident spend_drop --metric total_cost --since 2026-02-15
 ```
 
 ```
-🔍 RECONCILIATION ANALYSIS
-=========================
-Metric: total_unique_users
-Method: exact
+🧠 SEMSTRAIT TRUST INCIDENT: "Spend dropped" (total_cost)
+=========================================================
+VERDICT: 🟡 LIKELY DATA GAP (not real performance)
+CONFIDENCE: HIGH (0.91)
+IMPACT: 0.0% vs expected
+NEXT: Re-ingest facebook_campaigns for 2026-02-15 00:00–23:59 UTC
 
-📊 Results:
-  Semantic:  4
-  Baseline:  4
-  Difference: 0
-  Matches:   ✅ Yes
+1) SAFETY CHECK (Freshness + Completeness)
+------------------------------------------
+adwords         🟢 OK  ...
+facebook        🟢 OK  ... 17h missing
 
-📝 Notes:
-  adwords_campaigns: 2 distinct users
-  facebook_campaigns: 2 distinct users
-  ✅ Semantic and baseline distinct counts match exactly
+2) WHERE IT BREAKS (Provenance)
+-------------------------------
+
+3) ROOT CAUSE HYPOTHESIS
+------------------------
+🔴 Missing ingestion window detected
+- facebook_campaigns rows: expected 1,200–1,600/day, got 320
+- watermark stalled at: 2026-02-15 06:00 UTC
+
+4) RECOMMENDED ACTIONS
+----------------------
+A) Re-ingest facebook_campaigns [2026-02-15 06:00 → 23:59]
+B) Notify stakeholders: "dashboard not safe until backfill completes"
+C) Optional: enable alert policy "must be complete by 09:00 UTC daily"
+
+5) SHAREABLE ARTIFACTS
+----------------------
+✅ Proof Pack:   .semstrait_demo/snapshots/<id>/report.html
+✅ Audit JSON:   .semstrait_demo/snapshots/<id>/proof_pack.json
+✅ Slack Paste:  .semstrait_demo/snapshots/<id>/slack.txt
 ```
 
-**✅ Data quality validated. Distinct counts are accurate.**
+**Result**: Incident triaged. Verdict, confidence, and actions in one run. Shareable artifacts for collaboration.
 
-### Phase 2: Diagnose the Drop 🔍
+## 🎯 Trust in Action: Attribution & Tax Mismatch
 
-Generate the current spend number with full audit trail:
+**Scenario**: Numbers arrive daily but don't match platform reality. Facebook totals are consistently ~10% off, and daily cut-offs are inconsistent due to timezone drift.
 
 ```bash
-$ cargo run --manifest-path tools/semstrait_demo/Cargo.toml run
+# Health check shows data arrived but with partial-day lag
+$ cargo run --manifest-path tools/semstrait_demo/Cargo.toml health --scenario messy_alignment
+
+# Diff detects mapping mismatch with tax overhead guidance
+$ cargo run --manifest-path tools/semstrait_demo/Cargo.toml diff --metrics total_cost --explain --scenario messy_alignment
+
+# Reconcile shows timezone drift evidence
+$ cargo run --manifest-path tools/semstrait_demo/Cargo.toml reconcile total_cost --scenario messy_alignment --timezone America/Los_Angeles
+
+# Incident orchestrates all three engines for comprehensive analysis
+$ cargo run --manifest-path tools/semstrait_demo/Cargo.toml incident messy_alignment --metric total_cost --since 2026-02-15
+
+# Validate proposed fix via impact analysis
+$ cargo run --manifest-path tools/semstrait_demo/Cargo.toml impact --proposed-model tools/semstrait_demo/messy_alignment_fix.yaml --scenario messy_alignment --metrics total_cost
 ```
 
-```
-🔍 Semstrait Demo - Run Mode
-===========================
+**What each command highlights**:
 
-📁 Using temp directory: /tmp/demo-abc123
+- **`health`**: Safe-to-report (data fresh) but flags partial-day lag (last 4h incomplete)
+- **`diff`**: Facebook first divergence with "~10% lower" explanation and unmapped tax guidance
+- **`reconcile`**: Timezone mismatch ranked #1, with boundary drift evidence and tax overhead notes
+- **`incident`**: 🟡 MAPPING MISMATCH DETECTED verdict (not data gap), recommends semantic model update
+- **`impact`**: Proposed fix shows +10.0% change, confirming alignment with platform totals
 
-📊 Generating Parquet fixtures...
-  ✅ Generated AdWords data: 3 rows
-  ✅ Generated Facebook data: 2 rows
-
-🔐 REPRODUCIBILITY
-  📸 Snapshot ID: a1b2c3d4e5f67890
-  📅 As-of: 2024-01-01T00:00:00Z
-
-📐 Metric Formulas:
-  total_cost: CASE WHEN tableGroup = "adwords" THEN cost ELSE spend END
-
-⚡ Executing Substrait Plan...
-📊 Results: total_cost = $626.76, total_impressions = 60,000
-```
-
-**✅ Number reproduced with snapshot ID for audit trail.**
-
-### Phase 3: Diagnose the Drop 🔍
-
-Compare semantic calculation vs raw platform data to find where the drop occurred:
-
-```bash
-$ cargo run --manifest-path tools/semstrait_demo/Cargo.toml diff
-```
-
-```
-🔍 DISCREPANCY ANALYSIS
-======================
-❌ Divergence detected at account grain
-📍 Root cause: First difference at account level
-
-📊 Metric Variance Details:
-+------------------+------------+------------+----------------+----------------+-------------+
-| Metric          | Semantic   | Platform   | Abs Diff       | % Diff         | State       |
-+------------------+------------+------------+----------------+----------------+-------------+
-| total_cost      | 626.76     | 877.26     | -250.50        | -23.0%         | actual      |
-+------------------+------------+------------+----------------+----------------+-------------+
-
-💡 Root Cause Analysis:
-  - Platform shows: AdWords $626.76 + Facebook $250.50 = $877.26
-  - Semantic shows: $626.76 (only AdWords data present)
-  - Missing: Facebook spend data (-$250.50, -23.0% of total)
-```
-
-**✅ Root cause identified: Missing Facebook data, not a calculation error.**
-
-### Phase 4: Validate Fix Impact 🎯
-
-Before deploying a Facebook data fix, predict the impact:
-
-```bash
-$ cargo run --manifest-path tools/semstrait_demo/Cargo.toml impact --proposed-model fixed_model.yaml
-```
-
-```
-🎯 CHANGE IMPACT ANALYSIS
-========================
-📊 Row Impact:
-  Rows: +2 (+100.0%) from Facebook data
-
-📈 Metric Changes:
-+------------------+----------------+----------------+----------------+
-| Metric          | Current       | With Fix      | Change         |
-+------------------+----------------+----------------+----------------+
-| total_cost      | 626.76         | 877.26         | +250.50 (+40%) |
-| total_impressions| 60000          | 75000          | +15000 (+25%)  |
-+------------------+----------------+----------------+----------------+
-
-🎯 Overall Assessment:
-  ⚠️ MODERATE CHANGE - Facebook data restoration
-  ✅ No dependency breaks detected
-  ✅ Safe to deploy
-```
-
-**✅ Fix impact predicted. Safe to deploy.**
-
-### Phase 5: Verify Fix Success ✅
-
-After deployment, confirm the fix worked:
-
-```bash
-$ cargo run --manifest-path tools/semstrait_demo/Cargo.toml diff
-```
-
-```
-🔍 DISCREPANCY ANALYSIS
-======================
-✅ No significant divergence detected
-📍 All metrics match within tolerance (±1%)
-
-📊 Reconciliation: Semantic = Platform
-```
-
-**🎉 Trust restored. Marketing team can confidently report accurate spend numbers.**
+**Result**: Multi-factor root cause identified. Semantic model fix proposed and validated. Complex alignment issues resolved through systematic analysis.
 
 ## 🔄 The Trust Loop
 
-This workflow becomes automatic:
+1. **Incident** → Triage spend drops, metric changes, data gaps
+2. **Monitor** health daily → Catch pipeline issues early
+3. **Prove** numbers on-demand → Generate evidence and audit trails
+4. **Reconcile** counts regularly → Validate data quality and deduplication
+5. **Diagnose** discrepancies immediately → Quick root cause analysis
+6. **Validate** changes before deployment → Prevent outages
+7. **Repeat** → Build institutional trust in data
 
-1. **Monitor** health daily → Catch pipeline issues early
-2. **Prove** numbers on-demand → Generate evidence and audit trails
-3. **Reconcile** counts regularly → Validate data quality and deduplication
-4. **Diagnose** discrepancies immediately → Quick root cause analysis
-5. **Validate** changes before deployment → Prevent outages
-6. **Repeat** → Build institutional trust in data
+## 🏗️ Artifact Layout
 
-**Result**: Marketing teams stop asking "Can we trust this number?" and start asking "What does this number tell us about our business?"
+All commands emit shareable artifacts under `.semstrait_demo/`:
 
-## 🏗️ Architecture: Trust Substrate
+| Path | Contents |
+|------|----------|
+| `.semstrait_demo/snapshots/<id>/` | Report, HTML, Slack snippet, JSON per command |
+| `.semstrait_demo/lookups/<name>/` | `lookup.json`, `meta.json` for created lookups |
 
-The demo implements a complete trust layer with five substrate engines:
+## 🔧 Implementation Status
 
-### Prove Engine (`proof-pack`)
-- **Evidence Generation**: Metric formulas, measure mappings, source metadata
-- **Snapshot Persistence**: Complete artifacts saved to `.semstrait_demo/snapshots/`
-- **Deterministic Reproducibility**: BLAKE3 hashes including data fingerprints
-- **Shareable Links**: file:// URLs for collaboration and audit trails
+### ✅ Fully Working
+- **Incident Orchestrator**: Health + diff + proof-pack → verdict, confidence, actions, artifacts
+- **Health Engine**: Safe-to-report, top alerts, completeness, freshness, provenance
+- **Proof Pack Engine**: Value, meaning, human/exact definitions, lineage, exportables
+- **Diff Engine**: Verdict, first divergence, provenance breakdown, explain, artifacts
+- **Impact Engine**: Verdict, what changed, risk checks, exportables
+- **Reconcile Engine**: Protocol output, baseline/timezone knobs, ranked reasons, artifacts
+- **Dictionary Export**: Dimensions, measures, metrics to CSV/JSON
+- **Lookup Management**: Create from CSV (dedupe), list saved lookups
+- **DataFusion Integration**: Real execution on Parquet with snapshot persistence
 
-### Diagnose Engine (`diff`)
-- **Semantic vs Platform Comparison**: Executes both semantic models and raw platform SQL
-- **Grain-Aware Root Cause**: Hierarchical drilldown (day → account → campaign → ad)
-- **Value State Classification**: actual_value, zero, null, missing_source, filtered_out
-- **Aggregation Warnings**: Detects non-additive metrics and calculation errors
-
-### Reconcile Engine (`reconcile`)
-- **Distinct Count Validation**: Semantic vs baseline exact matching
-- **Cross-Platform Verification**: Multi-source deduplication accuracy
-- **Data Quality Metrics**: Row counts, user attribution validation
-- **Audit Compliance**: Mathematical validation with detailed notes
-
-### Validate Engine (`impact`)
-- **Dual Execution Mode**: Current model vs proposed model comparison
-- **Change Impact Prediction**: Row deltas, metric deltas, null rate changes
-- **Edge Case Detection**: NULL explosions, duplicate keys, CASE ELSE gaps
-- **Dependency Analysis**: Which dashboards/reports will break
-
-### Monitor Engine (`health`)
-- **Freshness Watermarking**: Ingestion completeness and data age tracking
-- **Anomaly Detection**: Volume drops, value collapses, schema mismatches
-- **Backfill State Tracking**: Running/partial/complete/stale status
-- **Data Fingerprinting**: Cryptographic verification of data integrity
-- **Alert System**: Configurable thresholds with JSON export
-
-### Technical Foundation
-- **DataFusion Integration**: Direct PlanNode execution (avoiding Substrait roundtrip)
-- **Grain Dimensions**: day/account/campaign/ad support for hierarchical analysis
-- **YAML Model Extensions**: Added grain dimensions and cross-tableGroup metrics
-- **Snapshot IDs**: BLAKE3 hashes for deterministic reproducibility
-
-## 🚀 Future: Production Trust Platforms
-
-This demo shows the foundation for enterprise trust platforms:
-
-### Enterprise Extensions
-- **Multi-Source Reconciliation**: Compare semantic results vs data warehouse, BI tools, exports
-- **Real-time Health Monitoring**: Streaming anomaly detection and alerting
-- **Change Management Integration**: GitOps workflows for model deployments
-- **Audit Trail Integration**: SOC 2 compliance and regulatory reporting
-
-### Advanced Analytics
-- **Causal Inference**: Why analysis with statistical significance testing
-- **Drift Detection**: Automatic alerting when data patterns change unexpectedly
-- **Trust Scoring**: Per-metric confidence levels based on historical accuracy
-- **Collaborative Debugging**: Shared investigation workflows across teams
-
-### Industry Applications
-- **Financial Services**: Regulatory reporting with automatic discrepancy resolution
-- **Healthcare**: Patient data reconciliation across systems with HIPAA compliance
-- **E-commerce**: Real-time inventory and pricing trust validation
-- **Manufacturing**: IoT sensor data quality and predictive maintenance
+### ⚠️ Known Limitations
+- Virtual dimension projection (`_dataset.datasetGroup`) has emitter schema validation issues in some edge cases
+- Impact Engine: Full proposed-model comparison requires YAML file
 
 ## 🎯 The Trust Revolution
-
-## 🔧 Current Implementation Status
-
-This demo showcases the **complete trust substrate architecture** with fully working implementations of:
-
-### ✅ **Fully Working**
-- **Health Engine**: Data quality assessment, freshness watermarks, configurable baselines, alert generation
-- **Drilldown Engine**: Row-level analysis of contributing data with mock row contributions
-- **Diff Engine**: Grain-aware discrepancy analysis (detects divergence at tableGroup level)
-- **Proof Pack Engine**: Reproducible evidence generation with snapshot IDs and metric traceability
-- **Reconcile Engine**: Distinct count validation comparing semantic vs baseline calculations
-- **DataFusion Integration**: Real execution of semstrait plans on Parquet data with snapshot persistence
-
-### ⚠️ **Limited by Virtual Dimensions**
-- **Impact Engine**: Change validation requires proposed model files (not implemented yet)
-- **Query Engine**: Advanced grouping queries limited by virtual dimension issues
-
-### 🐛 **Known Issues**
-- Virtual dimension projection (`_table.tableGroup`) has emitter schema validation issues
-- Workaround: Current implementation uses simplified grain analysis
-- Core trust engine functionality remains intact and production-ready
-
-## 🚀 The Trust Revolution
 
 Traditional semantic layers solved the "how calculated" problem. Semstrait's trust layer solves the "why trust" problem.
 
 **Before**: Teams fear their data and make conservative decisions.
 
 **After**: Teams trust their data completely and make bold, data-driven decisions.
-
-

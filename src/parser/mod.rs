@@ -28,7 +28,7 @@ mod tests {
 
     #[test]
     fn test_parse_steelwheels() {
-        let schema = parse_file("test_data/steelwheels.yaml").unwrap();
+        let schema = parse_file("test_data/steelwheels.yaml").expect("Failed to parse steelwheels.yaml");
         
         // Check models
         assert_eq!(schema.semantic_models.len(), 1);
@@ -74,7 +74,34 @@ mod tests {
         // Check CASE WHEN measure
         let premium = group.get_measure("premium_sales").unwrap();
         assert!(matches!(&premium.expr, MeasureExpr::Structured(ExprNode::Case(_))));
-        
+
+        // Check COALESCE measure (for demo coalesce support)
+        let coalesce_yaml = r#"
+semantic_models:
+  - name: "test"
+    datasetGroups:
+      - name: "test_group"
+        dimensions: []
+        measures:
+          - name: "safe_tax"
+            aggregation: sum
+            expr:
+              coalesce: [tax_amount, 0]
+            type: f64
+        datasets:
+          - dataset: "test_table"
+            source:
+              type: parquet
+              path: "/tmp/test.parquet"
+            dimensions: {}
+            measures: [safe_tax]
+"#;
+        let coalesce_schema = parse_str(coalesce_yaml).unwrap();
+        let coalesce_model = coalesce_schema.get_model("test").unwrap();
+        let coalesce_group = coalesce_model.dataset_groups.first().unwrap();
+        let safe_tax = coalesce_group.get_measure("safe_tax").unwrap();
+        assert!(matches!(&safe_tax.expr, MeasureExpr::Structured(ExprNode::Coalesce(_))));
+
         // Check metrics (still on model)
         let metric = model.get_metric("avg_unit_price").unwrap();
         assert_eq!(metric.label.as_deref(), Some("Average Unit Price"));

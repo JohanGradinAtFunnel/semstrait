@@ -249,6 +249,39 @@ impl Serialize for Aggregation {
     }
 }
 
+/// Aggregation rollup semantics for contract validation
+/// Determines how aggregations behave when combined across multiple datasets
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregationSemantics {
+    /// Can be safely combined across datasets (sum, count, min, max)
+    /// SUM(SUM(x)) = SUM(x), COUNT(COUNT(x)) = SUM(COUNT(x))
+    Distributive,
+    /// Cannot be safely combined without additional math (avg)
+    /// AVG(AVG(x)) != AVG(x)
+    Algebraic,
+    /// Cannot be safely combined at all (count_distinct)
+    /// COUNT_DISTINCT(COUNT_DISTINCT(x)) != COUNT_DISTINCT(x)
+    Holistic,
+}
+
+impl Aggregation {
+    /// Classify aggregation by its rollup semantics for contract validation
+    pub fn semantics(&self) -> AggregationSemantics {
+        match self {
+            Aggregation::Sum | Aggregation::Count | Aggregation::Min | Aggregation::Max => {
+                AggregationSemantics::Distributive
+            }
+            Aggregation::Avg => AggregationSemantics::Algebraic,
+            Aggregation::CountDistinct => AggregationSemantics::Holistic,
+        }
+    }
+
+    /// Check if this aggregation is safe for cross-datasetGroup rollups
+    pub fn is_safe_for_cross_dataset_rollup(&self) -> bool {
+        matches!(self.semantics(), AggregationSemantics::Distributive)
+    }
+}
+
 // ============================================================================
 // DataType methods
 // ============================================================================

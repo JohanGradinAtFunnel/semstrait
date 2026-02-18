@@ -112,10 +112,10 @@ pub async fn compute_snapshot_id(
     let plan_json = serde_json::to_string(substrait_plan)?;
     hasher.update(plan_json.as_bytes());
 
-    // Include data-state fingerprint (rowcount + max_event_time + schema hash per table)
-    let snapshot_store = crate::snapshot_store::SnapshotStore::new();
-    let data_fingerprint = snapshot_store.compute_data_fingerprint(table_paths).await?;
-    hasher.update(data_fingerprint.as_bytes());
+    // Include data-state fingerprint from inventory
+    let builder = crate::metadata::InventoryBuilder::new();
+    let inventory = builder.compute_inventory(table_paths, &repro_params.as_of).await?;
+    hasher.update(inventory.overall_fingerprint.as_bytes());
 
     // Generate hash
     let hash = hasher.finalize();
